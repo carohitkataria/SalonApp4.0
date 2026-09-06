@@ -9469,6 +9469,33 @@ async def add_family(salon_id: str, phone: str, m: FamilyMember,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "source": "edited",
         })
+    # PART 5.3 — if the buyer holds an active FAMILY membership, cover this new
+    # member automatically by appending their phone to covered_phones (respecting
+    # the plan's family_size) so their bookings get the discount right away.
+    try:
+        member10 = member["phone"]
+        fam_mem = await db.customer_memberships.find_one({
+            "salon_id": salon_id,
+            "is_active": True,
+            "is_family": True,
+            "$or": [
+                {"customer_phone": {"$in": _phone_variants(phone)}},
+                {"covered_phones": _norm10(phone)},
+            ],
+        }, {"_id": 0, "id": 1, "covered_phones": 1, "membership_plan_id": 1})
+        if fam_mem:
+            covered = list(fam_mem.get("covered_phones") or [])
+            if member10 not in covered:
+                _plan = await db.membership_plans.find_one(
+                    {"id": fam_mem.get("membership_plan_id")},
+                    {"_id": 0, "family_size": 1}) or {}
+                cap = int(_plan.get("family_size") or 4)
+                if len(covered) < cap:
+                    await db.customer_memberships.update_one(
+                        {"id": fam_mem["id"]},
+                        {"$addToSet": {"covered_phones": member10}})
+    except Exception:
+        pass
     return {"ok": True, "member": member}
 
 
@@ -11786,17 +11813,20 @@ async def sell_membership(salon_id: str, membership: CustomerMembershipCreate, c
     # up to family_size-1 listed members).
     covered_phones = None
     if plan.get("is_family"):
+        # PART 5.3 — a single customer CAN buy a family membership with zero
+        # members up front. Seed covered_phones with just the buyer; family
+        # members can be added later (appended to covered_phones) and then get
+        # the discount automatically.
         cust = await db.salon_customers.find_one(
             {"salon_id": salon_id, "phone": {"$in": _phone_variants(phone)}},
             {"_id": 0, "family_members": 1}) or {}
         fam = cust.get("family_members") or []
-        if len(fam) == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Add family members to this profile before selling a family membership.")
         fam_size = int(plan.get("family_size") or 4)
         covered_phones = [_norm10(phone)] + [
             _norm10(fm.get("phone")) for fm in fam][: max(0, fam_size - 1)]
+        # De-duplicate while preserving order (buyer first).
+        _seen = set()
+        covered_phones = [p for p in covered_phones if p and not (p in _seen or _seen.add(p))]
 
     # Calculate expiry date
     expiry_date = datetime.now(timezone.utc) + timedelta(days=plan["validity_months"] * 30)
@@ -13143,7 +13173,7 @@ async def get_barber_queue(
     if status:
         query["status"] = status
     if branch_id:
-        query["branch_id"] = branch_id
+        query["$or"] = [{"branch_id": branch_id}, {"branch_id": None}]
 
     tokens = await db.tokens.find(query, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return tokens
@@ -13178,7 +13208,9 @@ async def get_salon_queue(
     if status:
         query["status"] = status
     if branch_id:
-        query["branch_id"] = branch_id
+        # PART 1 — include older/unassigned direct invoices (branch_id null) so
+        # they don't vanish when a branch filter is active.
+        query["$or"] = [{"branch_id": branch_id}, {"branch_id": None}]
 
     tokens = await db.tokens.find(query, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return tokens
@@ -16416,20 +16448,67 @@ async def get_customer_profile(
     ) or {}
     wallet_balance = float(wallet_doc.get("balance") or 0)
 
-    mem = await db.customer_memberships.find_one(
-        {"salon_id": salon_id, "phone": {"$in": or_phones}, "status": {"$in": ["active", "Active"]}},
+    v10 = _norm10(ph)
+    mem_variants = _phone_variants(ph)
+    # PART 5.1 — active membership lookup using the SAME rule as
+    # _auto_membership_discount_percent (customer_phone variants OR family
+    # covered_phones; is_active + payment_confirmed; not expired). The old code
+    # queried the wrong fields (`phone` + `status`) so it always said "no
+    # membership". Also returns ALL memberships (active + inactive) for the drawer.
+    all_memberships = await db.customer_memberships.find(
+        {"salon_id": salon_id,
+         "$or": [{"customer_phone": {"$in": mem_variants}}, {"covered_phones": v10}]},
         {"_id": 0}
-    )
+    ).sort("purchased_at", -1).to_list(50)
+
+    def _mem_expired(m):
+        try:
+            exp = m.get("expiry_date")
+            return bool(exp) and datetime.fromisoformat(exp) < datetime.now(timezone.utc)
+        except Exception:
+            return False
+
+    membership_list = []
+    for m in all_memberships:
+        expired = _mem_expired(m)
+        is_active_m = bool(m.get("is_active")) and bool(m.get("payment_confirmed")) and not expired
+        membership_list.append({
+            "id": m.get("id"),
+            "name": m.get("membership_name") or m.get("tier") or "Membership",
+            "tier": m.get("tier"),
+            "is_family": bool(m.get("is_family")),
+            "is_active": is_active_m,
+            "expired": expired,
+            "wallet_balance": float(m.get("wallet_balance") or 0),
+            "expiry_date": m.get("expiry_date"),
+            "purchased_at": m.get("purchased_at"),
+            "covered_phones": m.get("covered_phones") or [],
+        })
+    active_memberships = [m for m in membership_list if m["is_active"]]
+    mem = active_memberships[0] if active_memberships else None
     membership_active = bool(mem)
-    membership_name = None
-    membership_expires = None
-    if mem:
-        plan_id = mem.get("plan_id")
-        if plan_id:
-            plan = await db.membership_plans.find_one({"id": plan_id}, {"_id": 0, "name": 1})
-            if plan:
-                membership_name = plan.get("name")
-        membership_expires = mem.get("expires_at") or mem.get("valid_till")
+    membership_name = mem["name"] if mem else None
+    membership_expires = mem["expiry_date"] if mem else None
+    try:
+        membership_discount_percent = await _auto_membership_discount_percent(salon_id, ph)
+    except Exception:
+        membership_discount_percent = 0.0
+
+    # PART 3 — signed wallet history (credits +, debits −) with running balance.
+    wallet_txns = await db.wallet_transactions.find(
+        {"salon_id": salon_id, "customer_phone": {"$in": mem_variants}},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(50)
+    wallet_history = [{
+        "date": t.get("created_at"),
+        "type": t.get("transaction_type"),
+        "amount": float(t.get("amount") or 0),
+        "signed_amount": (float(t.get("amount") or 0)
+                          if (t.get("transaction_type") == "credit")
+                          else -float(t.get("amount") or 0)),
+        "balance_after": float(t.get("balance_after") or 0),
+        "description": t.get("description"),
+    } for t in wallet_txns]
 
     history_tokens = [{
         "id": t.get("id"),
@@ -16489,6 +16568,10 @@ async def get_customer_profile(
         "membership_active": membership_active,
         "membership_name": membership_name,
         "membership_expires": membership_expires,
+        "membership_discount_percent": membership_discount_percent,
+        "memberships": membership_list,
+        "active_memberships": active_memberships,
+        "wallet_history": wallet_history,
         "total_visits": total_visits,
         "total_spend": round(total_spend, 2),
         "history_tokens": history_tokens,
@@ -16852,10 +16935,15 @@ async def create_direct_invoice(
     token_id = str(uuid.uuid4())
     token_number = await get_next_token_number(salon_id, today_str, shift)
 
+    # PART 1 — stamp branch_id the SAME way regular bookings do (resolve to the
+    # salon's main branch when the caller doesn't specify one) so direct invoices
+    # are assigned to a branch and show under the branch-filtered list.
+    di_branch_id = await resolve_branch_id(salon_id, body.get("branch_id"))
+
     token_doc = {
         "id": token_id,
         "salon_id": salon_id,
-        "branch_id": body.get("branch_id") or salon.get("main_branch_id"),
+        "branch_id": di_branch_id,
         "token_number": token_number,
         "customer_name": display_name,
         "phone": phone,

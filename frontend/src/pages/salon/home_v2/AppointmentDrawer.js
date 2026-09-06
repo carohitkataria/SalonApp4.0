@@ -378,27 +378,14 @@ export default function AppointmentDrawer({
     [memberships, sellMembershipId],
   );
 
-  // Item 1a — auto-apply a discount membership's % for the selected customer
-  // (editable afterwards). Runs whenever the chosen customer changes.
+  // PART 5.2 — auto-apply the membership discount % from the SAME lookup the
+  // backend uses at create time (surfaced on the guest profile as
+  // membership_discount_percent), so the bill preview matches what is charged.
+  // Covers individual AND family-covered members. Still editable afterwards.
   useEffect(() => {
-    const ph = customer?.phone;
-    if (!ph || !salonId) { setMembershipDiscPct(0); return; }
-    let cancelled = false;
-    (async () => {
-      try {
-        const { data } = await axios.get(
-          `${API}/salons/${salonId}/customers/${encodeURIComponent(ph)}/membership`,
-          { headers: authRef.current ? authRef.current() : {} });
-        if (cancelled) return;
-        if (data && data.plan_type === 'discount' && Number(data.discount_percent) > 0) {
-          setMembershipDiscPct(Number(data.discount_percent));
-        } else {
-          setMembershipDiscPct(0);
-        }
-      } catch (_) { if (!cancelled) setMembershipDiscPct(0); }
-    })();
-    return () => { cancelled = true; };
-  }, [customer?.phone, salonId]);
+    const pct = Number(custProfile?.membership_discount_percent || 0);
+    setMembershipDiscPct(pct > 0 ? pct : 0);
+  }, [custProfile]);
 
   const svcSub = svcRows.reduce((t, s) => t + linePrice(s), 0);
   const prodSub = prodRows.reduce((t, r) => t + Number(r.p.retail_price || r.p.selling_price || 0) * r.qty, 0);

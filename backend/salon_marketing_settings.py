@@ -518,6 +518,18 @@ class ManualConnectIn(BaseModel):
     display_name: Optional[str] = None
 
 
+class WabaRequestIn(BaseModel):
+    # PART 4 — the "Connect own WhatsApp number" form only sends the number +
+    # display name; the platform owner fills the technical WABA creds later. So
+    # here sender_phone_e164 is required and the WABA creds are optional (using
+    # the strict ManualConnectIn caused a 422 that crashed the page).
+    sender_phone_e164: str
+    display_name: Optional[str] = None
+    waba_id: Optional[str] = None
+    phone_number_id: Optional[str] = None
+    access_token: Optional[str] = None
+
+
 def _meta_enabled() -> bool:
     """True only when the platform Meta app credentials are present."""
     return bool(os.environ.get("META_APP_ID") and os.environ.get("META_APP_SECRET"))
@@ -667,7 +679,7 @@ async def embedded_signup_complete(salon_id: str, body: ESCompleteIn, request: R
 # The platform owner fills the technical WABA credentials from the owner console.
 # ========================================================
 @settings_router.post("/salons/{salon_id}/marketing/settings/waba/request")
-async def waba_request(salon_id: str, body: ManualConnectIn, request: Request):
+async def waba_request(salon_id: str, body: WabaRequestIn, request: Request):
     """Salon requests WhatsApp for its own number. Only `sender_phone_e164` and
     `display_name` are accepted here — the platform owner supplies the WABA ID,
     Phone Number ID and access token later. Sets status='pending' until then

@@ -14,6 +14,13 @@ export function extractErrorMessage(error, fallback = 'Something went wrong') {
   if (!error) return fallback;
   const raw = error?.response?.data?.detail ?? error?.response?.data;
   if (typeof raw === 'string') return raw;
+  // FastAPI 422 validation errors come back as an ARRAY of {loc, msg, type}.
+  if (Array.isArray(raw)) {
+    const first = raw[0];
+    if (first && typeof first === 'object') return first.msg || first.message || fallback;
+    if (typeof first === 'string') return first;
+    return fallback;
+  }
   if (raw && typeof raw === 'object') {
     return raw.message || raw.detail || raw.error || raw.msg || fallback;
   }

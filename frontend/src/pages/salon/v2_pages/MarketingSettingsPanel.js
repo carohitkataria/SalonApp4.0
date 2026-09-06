@@ -14,6 +14,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
+import { extractErrorMessage } from '../../../utils/apiError';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 const API = `${BACKEND_URL}/api`;
@@ -179,7 +180,7 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
       setSnap(full.data);
       setLedger(led.data?.entries || []);
     } catch (e) {
-      if (!opts.silent) toast.error(e.response?.data?.detail || 'Failed to load settings');
+      if (!opts.silent) toast.error(extractErrorMessage(e, 'Failed to load settings'));
     } finally { if (!opts.silent) setLoading(false); }
   }, [salonId, auth]);
 
@@ -214,7 +215,7 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
       toast.success('Usage synced from Twilio');
       fetchSnap({ silent: true });
     } catch (e) {
-      toast.error(e.response?.data?.detail || 'Sync failed');
+      toast.error(extractErrorMessage(e, 'Sync failed'));
     } finally { setSyncing(false); }
   };
 
@@ -256,7 +257,7 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
               await axios.post(`${API}/salons/${salonId}/wallet/auto-recharge`, payload, { headers: auth() });
               toast.success('Auto-recharge saved');
               fetchSnap({ silent: true });
-            } catch (e) { toast.error(e.response?.data?.detail || 'Save failed'); }
+            } catch (e) { toast.error(extractErrorMessage(e, 'Save failed')); }
           }}
         />
         <SpendCard spend={spend} syncing={syncing} onSync={runUsageSync} />
@@ -323,7 +324,7 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
               await axios.post(`${API}/salons/${salonId}/marketing/settings/dlt`, payload, { headers: auth() });
               toast.success('DLT config saved');
               fetchSnap({ silent: true });
-            } catch (e) { toast.error(e.response?.data?.detail || 'Save failed'); }
+            } catch (e) { toast.error(extractErrorMessage(e, 'Save failed')); }
           }}
         />
         <EmailCard
@@ -333,7 +334,7 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
               await axios.post(`${API}/salons/${salonId}/marketing/settings/email`, payload, { headers: auth() });
               toast.success('Email sender saved');
               fetchSnap({ silent: true });
-            } catch (e) { toast.error(e.response?.data?.detail || 'Save failed'); }
+            } catch (e) { toast.error(extractErrorMessage(e, 'Save failed')); }
           }}
         />
       </div>
@@ -351,7 +352,7 @@ export default function MarketingSettingsPanel({ salonId, authHeaders }) {
               await axios.post(`${API}/salons/${salonId}/marketing/settings/sending-windows`, payload, { headers: auth() });
               toast.success('Sending windows saved');
               fetchSnap({ silent: true });
-            } catch (e) { toast.error(e.response?.data?.detail || 'Save failed'); }
+            } catch (e) { toast.error(extractErrorMessage(e, 'Save failed')); }
           }}
         />
       </div>
@@ -399,7 +400,7 @@ function MetaConnectCard({ salonId, auth, conn, onChange }) {
       await axios.post(`${API}/salons/${salonId}/marketing/settings/waba/request`, form, { headers: auth() });
       toast.success('Request submitted — our team will activate your number shortly.');
       refetch();
-    } catch (e) { toast.error(e.response?.data?.detail || 'Request failed'); }
+    } catch (e) { toast.error(extractErrorMessage(e, 'Request failed')); }
     finally { setBusy(false); }
   };
   const disconnect = async () => {
@@ -482,7 +483,7 @@ function WhatsAppSenderCard({ salonId, auth }) {
       setSenderNum(w.sender_number || w.requested_number || '');
       setOwnWaba(!!w.own_waba);
     } catch (e) {
-      toast.error(e.response?.data?.detail || 'Failed to load WhatsApp sender');
+      toast.error(extractErrorMessage(e, 'Failed to load WhatsApp sender'));
     }
   }, [salonId, auth]);
 
@@ -504,7 +505,7 @@ function WhatsAppSenderCard({ salonId, auth }) {
       toast.success('Request sent — the SalonHub team will set up your number');
       setReqNum(''); setReqBiz('');
       load();
-    } catch (e) { toast.error(e.response?.data?.detail || 'Request failed'); }
+    } catch (e) { toast.error(extractErrorMessage(e, 'Request failed')); }
     finally { setBusy(false); }
   };
 
@@ -516,7 +517,7 @@ function WhatsAppSenderCard({ salonId, auth }) {
         { headers: auth() });
       toast.success('Sender configuration saved');
       load();
-    } catch (e) { toast.error(e.response?.data?.detail || 'Save failed'); }
+    } catch (e) { toast.error(extractErrorMessage(e, 'Save failed')); }
     finally { setBusy(false); }
   };
 
@@ -527,7 +528,7 @@ function WhatsAppSenderCard({ salonId, auth }) {
         { active: next }, { headers: auth() });
       toast.success(next ? 'Salon is now sending from its own number' : 'Reverted to SalonHub default number');
       load();
-    } catch (e) { toast.error(e.response?.data?.detail || 'Activation failed'); }
+    } catch (e) { toast.error(extractErrorMessage(e, 'Activation failed')); }
     finally { setBusy(false); }
   };
 
@@ -541,7 +542,7 @@ function WhatsAppSenderCard({ salonId, auth }) {
       if (st === 'sent') toast.success('Test message sent');
       else if (st === 'mock') toast('Twilio not configured — mock send');
       else toast.error('Test send failed: ' + (res.data?.result?.error || st));
-    } catch (e) { toast.error(e.response?.data?.detail || 'Test failed'); }
+    } catch (e) { toast.error(extractErrorMessage(e, 'Test failed')); }
     finally { setBusy(false); }
   };
 
@@ -956,7 +957,7 @@ function TopupDrawer({ open, onClose, salonId, auth, env, wallet, onDone }) {
       cf.checkout({ paymentSessionId: data.payment_session_id, redirectTarget: '_modal' });
       toast.success('Complete payment in the Cashfree modal');
     } catch (e) {
-      toast.error(e.response?.data?.detail || 'Failed to create order');
+      toast.error(extractErrorMessage(e, 'Failed to create order'));
     } finally { setBusy(false); }
   };
 
@@ -968,7 +969,7 @@ function TopupDrawer({ open, onClose, salonId, auth, env, wallet, onDone }) {
       }, { headers: auth() });
       toast.success('Simulated credit successful — wallet updated');
       onDone?.();
-    } catch (e) { toast.error(e.response?.data?.detail || 'Simulate failed'); }
+    } catch (e) { toast.error(extractErrorMessage(e, 'Simulate failed')); }
   };
 
   const content = (

@@ -233,6 +233,10 @@ export default function EnhancedSalonDashboard() {
   // Tracks which discount field the user typed into last so we can correctly
   // recompute the other (true => discount %; false => final ₹).
   const discountSourceRef = useRef('percent');
+  // PART 2 — always call the LATEST fetchTokens (with the current wide all/history
+  // + branch params) from socket/poll handlers, avoiding a stale closure that
+  // re-scopes to a narrow filter and drops just-created rows.
+  const fetchTokensRef = useRef(null);
   
   // Payment Confirmation Dialog (for Complete action)
   const [showPaymentConfirmDialog, setShowPaymentConfirmDialog] = useState(false);
@@ -313,18 +317,20 @@ export default function EnhancedSalonDashboard() {
         fetchDailySales(storedSalonId);
         return;
       }
-      // 2) Status-only event (e.g. token_completed {token_id}) → patch that row.
+      // 2) Status-only event (e.g. token_completed {token_id}) → patch that row
+      //    IN PLACE only. PART 2: a WhatsApp status/delivery update must never
+      //    trigger a full re-scoped re-fetch that can drop just-created rows.
       if (payload && typeof payload === 'object' && payload.token_id) {
         setTokens((prev) => Array.isArray(prev)
-          ? prev.map((t) => (t.id === payload.token_id ? { ...t, status: 'completed' } : t))
+          ? prev.map((t) => (t.id === payload.token_id
+              ? { ...t, status: payload.status || 'completed', ...(payload.invoice_id ? { invoice_id: payload.invoice_id } : {}) }
+              : t))
           : prev);
         fetchDailySales(storedSalonId);
-        // Light background refresh (non-blanking) to pick up invoice_id etc.
-        fetchTokens(storedSalonId);
         return;
       }
-      // 3) Unknown payload shape → safe refetch (non-blanking).
-      fetchTokens(storedSalonId);
+      // 3) Unknown payload shape → safe refetch (non-blanking, latest params).
+      if (fetchTokensRef.current) fetchTokensRef.current(storedSalonId);
       fetchDailySales(storedSalonId);
     };
 
@@ -359,7 +365,7 @@ export default function EnhancedSalonDashboard() {
     const tick = () => {
       // Only refresh while the tab is visible — saves resources / mobile battery.
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      fetchTokens(storedSalonId);
+      if (fetchTokensRef.current) fetchTokensRef.current(storedSalonId);
       fetchDailySales(storedSalonId);
     };
     // Kick immediately so range/date changes are reflected without waiting.
@@ -368,7 +374,7 @@ export default function EnhancedSalonDashboard() {
     // Also refresh immediately when the tab becomes visible again.
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        fetchTokens(storedSalonId);
+        if (fetchTokensRef.current) fetchTokensRef.current(storedSalonId);
         fetchDailySales(storedSalonId);
       }
     };
@@ -535,6 +541,8 @@ export default function EnhancedSalonDashboard() {
       console.error('Error fetching tokens:', error);
     }
   };
+  // Keep the ref pointing at the latest fetchTokens (PART 2 — used by socket/poll).
+  fetchTokensRef.current = fetchTokens;
 
   // Pure upsert-by-id + re-sort in place. Keeps the list ordered by created_at
   // DESC (newest first) — exactly mirroring the backend /queue order — so an
