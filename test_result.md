@@ -12252,3 +12252,52 @@ branch_drawer_2026_09_05b:
            - WABA request with no auth correctly rejected with 403
         
         All three parts are production-ready and fully functional. No issues requiring main agent attention.
+
+#====================================================================================================
+# SESSION 2026-09-06 (SalonHub PART 3 — merge guest drawers into GuestProfileModal). Salon 71d6d20c-ecb2-43f9-949d-9c10419775ca, admin/salon123.
+# NOTE: fresh container — recreated backend/.env (added JWT_SECRET_KEY, PUBLIC_BASE_URL) and frontend/.env
+#       (REACT_APP_BACKEND_URL=https://repo-compiler-4.preview.emergentagent.com). PARTS 1,2,4,5 already done+tested in prior sessions.
+#====================================================================================================
+part3_merge_drawers_2026_09_06:
+  frontend:
+    - task: "PART 3 — unify guest viewer into GuestProfileModal (Guests + Booking screens); add Membership & Wallet"
+      implemented: true
+      working: true
+      file: "frontend/src/pages/salon/home_v2/GuestProfileModal.js, frontend/src/pages/salon/v2_pages/CustomersV2.js, frontend/src/pages/salon/home_v2/QueueTabV2.js"
+      stuck_count: 0
+      priority: "high"
+      needs_retesting: false
+      status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            Enhanced shared GuestProfileModal with a new 'Membership & Wallet' tab: wallet balance + membership
+            discount % tiles; Active memberships list (name, Family badge, Active/Inactive/Expired badge, expiry,
+            wallet); a collapsible 'Past & inactive memberships' section (only shown when inactive plans exist);
+            and a signed 'Wallet & balance history' table (credits +green, debits -pink) with running balance
+            (balance_after) — all from existing get_customer_profile fields (memberships, active_memberships,
+            wallet_history, membership_discount_percent). CustomersV2 now opens this SHARED GuestProfileModal on
+            guest-row click (removed the local ~470-line GuestProfileDrawer + unused `selected` memo) and passes
+            onBook (dispatches salon:open-new-appointment). QueueTabV2 also passes onBook so the Book button shows
+            on the booking screen. CustomerDrawer KEPT only as the Add-guest create form (plan option a).
+            VERIFIED VISUALLY (screenshots): guest click on Guests screen opens the merged drawer; Membership &
+            Wallet tab shows discount 15%, active 'Gold Wallet Plan' (Family/Active badges, expiry, wallet ₹500),
+            and signed history +₹500 with running balance ₹500. Book button opens the appointment drawer. Existing
+            Overview/edit, Visits & history (with invoice links), Family CRUD, Block-online toggle all preserved.
+  metadata:
+    created_by: "main_agent"
+    version: "1.0"
+    test_sequence: 0
+    run_ui: false
+  test_plan:
+    current_focus:
+      - "PART 3 — unify guest viewer into GuestProfileModal (Guests + Booking screens); add Membership & Wallet"
+    stuck_tasks: []
+    test_all: false
+    test_priority: "high_first"
+  agent_communication:
+    - agent: "main"
+      message: |
+        PART 3 frontend done. Only frontend changed (no backend logic touched — get_customer_profile already
+        returns memberships/active_memberships/wallet_history from prior session). Visually verified. Awaiting
+        user go-ahead before running the automated frontend testing agent.

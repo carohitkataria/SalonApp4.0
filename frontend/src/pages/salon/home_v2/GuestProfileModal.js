@@ -58,6 +58,8 @@ export default function GuestProfileModal({ open, onClose, phone, salonId, getAu
   // notes
   const [notes, setNotes] = useState('');
   const [notesBusy, setNotesBusy] = useState(false);
+  // membership & wallet — collapsible for past/inactive plans
+  const [showInactiveMem, setShowInactiveMem] = useState(false);
 
   const authRef = useRef(getAuthHeaders);
   useEffect(() => { authRef.current = getAuthHeaders; }, [getAuthHeaders]);
@@ -194,9 +196,34 @@ export default function GuestProfileModal({ open, onClose, phone, salonId, getAu
     </div>
   );
 
+  // ----- Membership & Wallet (PART 3) -----
+  const allMems = p.memberships || [];
+  const activeMems = allMems.filter((m) => m.is_active);
+  const inactiveMems = allMems.filter((m) => !m.is_active);
+  const walletHistory = p.wallet_history || [];
+  const miniBadge = (c) => ({ display: 'inline-block', marginLeft: 6, fontSize: 10, fontWeight: 800, borderRadius: 6, padding: '2px 7px', background: c + '1A', color: c, whiteSpace: 'nowrap' });
+  const MemRow = ({ m }) => (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '9px 0', borderBottom: '1px solid #F2F1FA' }}>
+      <div>
+        <div style={{ fontWeight: 800, fontSize: 13, color: '#2B2B3A' }}>
+          {m.name}
+          {m.is_family && <span style={miniBadge('#6C4FE0')}>Family</span>}
+        </div>
+        <div style={{ fontSize: 11.5, color: '#8A8EA0', marginTop: 2 }}>
+          {m.expiry_date ? `Expires ${fmtDate(m.expiry_date)}` : 'No expiry'}
+          {m.wallet_balance > 0 ? ` · Wallet ${fmtRupee(m.wallet_balance)}` : ''}
+        </div>
+      </div>
+      <span style={miniBadge(m.expired ? '#C77700' : (m.is_active ? '#0E9C82' : '#9A9EAE'))}>
+        {m.expired ? 'Expired' : (m.is_active ? 'Active' : 'Inactive')}
+      </span>
+    </div>
+  );
+
   const tabs = [
     ['overview', 'Overview'],
     ['visits', 'Visits & history'],
+    ['wallet', 'Membership & Wallet'],
     ['family', `Family${family.length ? ` · ${family.length}` : ''}`],
     ['messages', 'Messages'],
     ['notes', 'Notes'],
@@ -387,6 +414,62 @@ export default function GuestProfileModal({ open, onClose, phone, salonId, getAu
                       })}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* MEMBERSHIP & WALLET */}
+              {tab === 'wallet' && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
+                    <div className="p-card"><div className="lb">Wallet balance</div><div className="val" style={{ color: '#12A594', fontSize: 18 }}>{fmtRupee(p.wallet_balance)}</div></div>
+                    <div className="p-card"><div className="lb">Membership discount</div><div className="val" style={{ color: (p.membership_discount_percent > 0) ? '#6C4FE0' : '#9A9EAE', fontSize: 18 }}>{p.membership_discount_percent > 0 ? `${p.membership_discount_percent}%` : '—'}</div></div>
+                  </div>
+
+                  <Card title="Active memberships">
+                    {activeMems.length === 0 ? (
+                      <div style={{ color: '#9A9EAE', fontWeight: 600, fontSize: 12.5 }}>No active membership.</div>
+                    ) : activeMems.map((m) => <MemRow key={m.id || m.name} m={m} />)}
+                  </Card>
+
+                  {inactiveMems.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <button onClick={() => setShowInactiveMem((v) => !v)} data-testid="guest-inactive-mem-toggle" style={{
+                        width: '100%', textAlign: 'left', fontSize: 12.5, fontWeight: 800, color: '#5B5F70',
+                        background: '#F4F5F9', border: '1px solid #EEF0F6', borderRadius: 10, padding: '10px 12px', cursor: 'pointer',
+                      }}>
+                        {showInactiveMem ? '▾' : '▸'} Past &amp; inactive memberships · {inactiveMems.length}
+                      </button>
+                      {showInactiveMem && (
+                        <div style={{ border: '1px solid #EEF0F6', borderTop: 'none', borderRadius: '0 0 10px 10px', padding: '2px 14px 8px', background: '#fff' }}>
+                          {inactiveMems.map((m) => <MemRow key={m.id || m.name} m={m} />)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <Card title="Wallet &amp; balance history">
+                    {walletHistory.length === 0 ? (
+                      <div style={{ color: '#9A9EAE', fontWeight: 600, fontSize: 12.5 }}>No wallet movements yet.</div>
+                    ) : (
+                      <div className="hist">
+                        <div className="row head" style={{ display: 'grid', gridTemplateColumns: '0.9fr 1.7fr 0.9fr 0.9fr' }}>
+                          <div>Date</div><div>Detail</div><div style={{ textAlign: 'right' }}>Amount</div><div style={{ textAlign: 'right' }}>Balance</div>
+                        </div>
+                        {walletHistory.map((w, i) => {
+                          const credit = (Number(w.signed_amount) || 0) >= 0;
+                          const amt = Math.abs(Number(w.signed_amount) || Number(w.amount) || 0);
+                          return (
+                            <div key={i} className="row" style={{ display: 'grid', gridTemplateColumns: '0.9fr 1.7fr 0.9fr 0.9fr', alignItems: 'center' }}>
+                              <div>{fmtDate(w.date, { day: '2-digit', month: 'short' })}</div>
+                              <div style={{ color: '#5B5F70' }}>{w.description || (w.type === 'credit' ? 'Credit' : 'Debit')}</div>
+                              <div style={{ textAlign: 'right', fontWeight: 800, color: credit ? '#0E9C82' : '#E45C86' }}>{credit ? '+' : '−'}{fmtRupee(amt)}</div>
+                              <div style={{ textAlign: 'right', fontWeight: 700 }}>{fmtRupee(w.balance_after)}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </Card>
                 </div>
               )}
 

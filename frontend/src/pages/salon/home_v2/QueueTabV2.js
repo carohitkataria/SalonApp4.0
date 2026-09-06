@@ -796,6 +796,11 @@ export default function QueueTabV2({
         phone={profilePhone}
         salonId={salonId}
         getAuthHeaders={getAuthHeaders}
+        onBook={(g) => {
+          const guest = { id: g?.id, name: g?.name, phone: g?.phone, gender: g?.gender };
+          window.dispatchEvent(new CustomEvent('salon:open-new-appointment', { detail: { guest } }));
+          setProfilePhone(null);
+        }}
       />
     </div>
   );
