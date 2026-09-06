@@ -4021,6 +4021,34 @@ async def generate_and_send_invoice(token_id: str):
             })
             subtotal += net_price
 
+        # ---- Membership sold on this invoice → render as a paid line item ----
+        # A membership sale is a paid line (not a service/product). Without this,
+        # a membership-only invoice would show no items and a ₹0 total (which also
+        # made the Bookings list and WhatsApp message show ₹0).
+        _mem_sale = float(token.get('membership_sale_amount') or 0)
+        if _mem_sale > 0:
+            _mem_name = token.get('membership_name') or 'Membership'
+            _mem_label = f"{_mem_name} (Membership)"
+            services_data.append({
+                "name": _mem_label,
+                "price": _mem_sale,
+                "discount": 0,
+                "amount": _mem_sale,
+            })
+            render_items.append({
+                "name": _mem_label,
+                "desc": "Membership plan",
+                "stylist": "",
+                "sac": inv_settings.get('sac_code'),
+                "qty": 1,
+                "rate": _mem_sale,
+                "discount": 0,
+                "discount_pct": 0,
+                "amount": _mem_sale,
+                "is_membership": True,
+            })
+            subtotal += _mem_sale
+
         # ---- Discounts / tip from the token record ----
         discount_amount = float(token.get('order_discount_amount') or 0)
         if not discount_amount:
@@ -4031,7 +4059,7 @@ async def generate_and_send_invoice(token_id: str):
         # the guard below prevents double-counting for those.
         _mem_pct = float(token.get('membership_discount_percent') or 0)
         if _mem_pct > 0 and not float(token.get('membership_discount') or 0):
-            _svc_only_subtotal = sum(float(i.get('amount') or 0) for i in render_items)
+            _svc_only_subtotal = sum(float(i.get('amount') or 0) for i in render_items if not i.get('is_membership'))
             _mem_amt = round(_svc_only_subtotal * _mem_pct / 100.0, 2)
             discount_amount = round(discount_amount + _mem_amt, 2)
         tip_amount = float(token.get('tip_amount') or 0)
@@ -16793,11 +16821,12 @@ async def create_direct_invoice(
             raise HTTPException(status_code=400, detail="Customer phone required to sell membership")
 
         # Apply plan's service discount to THIS order (services only, not products)
-        disc_pct = float(plan.get("discount_percentage") or plan.get("service_discount_pct") or 0)
+        disc_pct = float(plan.get("discount_percent") or plan.get("discount_percentage") or plan.get("service_discount_pct") or 0)
         service_only_subtotal = subtotal - product_subtotal
         membership_discount = round(service_only_subtotal * disc_pct / 100.0, 2)
-        # The membership itself is a paid line (paid_amount from plan price)
-        membership_sale_amount = float(plan.get("price") or plan.get("plan_price") or 0)
+        # The membership itself is a paid line (paid_amount from plan price).
+        # Membership plans store the sale price under `amount` (not price/plan_price).
+        membership_sale_amount = float(plan.get("amount") or plan.get("price") or plan.get("plan_price") or 0)
 
         expiry_date = datetime.now(timezone.utc) + timedelta(days=int(plan.get("validity_months") or 6) * 30)
         existing = await db.customer_memberships.find_one({
@@ -16962,6 +16991,7 @@ async def create_direct_invoice(
         "coupon_code": coupon_code,
         "tip_amount": tip_amount,
         "membership_sale_amount": membership_sale_amount,
+        "membership_name": (membership_info or {}).get("name") if membership_plan_id else None,
         "membership_discount_percent": (membership_info or {}).get("discount_pct", 0) or 0,
         "date": today_str,
         "shift": shift,

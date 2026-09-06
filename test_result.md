@@ -12301,3 +12301,179 @@ part3_merge_drawers_2026_09_06:
         PART 3 frontend done. Only frontend changed (no backend logic touched — get_customer_profile already
         returns memberships/active_memberships/wallet_history from prior session). Visually verified. Awaiting
         user go-ahead before running the automated frontend testing agent.
+
+#====================================================================================================
+# SESSION 2026-09-06b (BUG — membership sale amount shows ₹0 in bookings list, invoice & WhatsApp). Salon 71d6d20c-ecb2-43f9-949d-9c10419775ca, admin/salon123.
+#====================================================================================================
+membership_sale_zero_bugfix:
+  backend:
+    - task: "Membership sale amount not ₹0 in direct-invoice (bookings list + invoice line item + WhatsApp total)"
+      implemented: true
+      working: true
+      file: "backend/server.py (create_direct_invoice ~16796/16800/16964; generate_and_send_invoice membership line item ~4022)"
+      stuck_count: 0
+      priority: "high"
+      needs_retesting: false
+      status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ VERIFIED (14/14 passed): membership-only sale grand_total/membership_sale/token.total_amount==₹2000
+            (not 0) and appears in /queue with ₹2000; public invoice /view HTML contains the membership line item
+            with ₹2,000.00; membership+service grand_total=₹3275 (₹1275 discounted service + ₹2000 membership) with
+            the 15% plan discount applied to the SERVICE only (membership line uncharged); both lines shown; service-
+            only regression OK (₹1500). No 500s. Production-ready.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            ROOT CAUSE: create_direct_invoice read the membership plan price from plan.get("price")/"plan_price"
+            and the discount from plan.get("discount_percentage")/"service_discount_pct", but membership plans are
+            stored with fields `amount` and `discount_percent`. Both resolved to 0 → membership_sale_amount=0 →
+            token.total_amount(grand_total)=0 (bookings list showed ₹0). Additionally generate_and_send_invoice never
+            rendered a membership line item nor added the sale to the invoice subtotal/grand_total, so the invoice
+            showed ₹0 with no item and the WhatsApp invoice amount (driven by the invoice grand_total) was ₹0.
+            FIX: (1) read plan.get("amount")/"price"/"plan_price" for sale amount and plan.get("discount_percent")/
+            "discount_percentage"/"service_discount_pct" for discount %; (2) store membership_name on the token;
+            (3) in generate_and_send_invoice, when token.membership_sale_amount>0 append a "<name> (Membership)"
+            line item (rate=amount, no discount, flagged is_membership) and add it to subtotal; (4) exclude
+            is_membership lines from the PART-6 membership-discount guard so the plan's % is never applied to the
+            membership line itself. Totals/tax/numbering logic otherwise unchanged.
+            MANUAL SMOKE (passed): membership-only direct invoice → grand_total=2000, membership_sale=2000,
+            token.total_amount=2000; invoice HTML contains "Membership" + "2,000".
+            TEST: (a) membership-only sale POST /api/salons/{id}/direct-invoice {membership_plan_id (plan with
+            amount>0), phone, payment_mode:"cash", NO services/products} → 200; totals.grand_total == plan.amount,
+            totals.membership_sale == plan.amount; token.total_amount == plan.amount (NOT 0); GET /queue shows that
+            token with total_amount == plan.amount. (b) GET /api/invoices/{invoice_id}/view (public) → HTML contains
+            the membership line item and the amount (NOT ₹0, and NOT empty items). (c) membership + a service sale →
+            grand_total == service_net(after plan discount%) + plan.amount + tip; invoice shows BOTH the service line
+            and the membership line; the plan discount% is applied to the SERVICE only (not to the membership line).
+            (d) plain service-only direct invoice (no membership) still totals correctly (regression). Do NOT change
+            invoice totals/tax/numbering. WhatsApp/Meta are MOCK — just confirm no 500 and the invoice total is right.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ BUG FIX FULLY TESTED AND WORKING (14/14 tests passed): Comprehensive backend testing completed successfully for salon 71d6d20c-ecb2-43f9-949d-9c10419775ca. AUTHENTICATION: Admin login working perfectly with identifier='admin', password='salon123'. WhatsApp/Meta are in MOCK mode as expected. Test suite: /app/backend_test.py with 14 comprehensive test cases covering all specified scenarios. NO CRITICAL ISSUES FOUND.
+            
+            SETUP:
+            - Created membership plan "QA Sale Plan" with amount=₹2000, discount_percent=15%
+            - Retrieved service "Hair Colour" (₹1500) and barber "Imran" for testing
+            
+            TEST RESULTS:
+            
+            TEST (a) - MEMBERSHIP-ONLY SALE ✅ PASS (3/3 assertions)
+            - POST /api/salons/{salon_id}/direct-invoice with ONLY membership_plan_id (NO services/products)
+            - Response: HTTP 200, token_number="E2", invoice_id created
+            - VERIFIED: totals.grand_total == ₹2000 (NOT 0) ✓
+            - VERIFIED: totals.membership_sale == ₹2000 (NOT 0) ✓
+            - VERIFIED: token.total_amount == ₹2000 (NOT 0) ✓
+            - GET /api/salons/{salon_id}/queue returned HTTP 200
+            - VERIFIED: Token E2 found in queue with total_amount == ₹2000 (NOT 0) ✓
+            - CORE BUG FIXED: Membership-only sale now shows correct amount (was ₹0 before)
+            
+            TEST (b) - PUBLIC INVOICE VIEW ✅ PASS (4/4 assertions)
+            - GET /api/invoices/{invoice_id}/view with NO Authorization header
+            - Response: HTTP 200 text/html (13,235 bytes)
+            - VERIFIED: Invoice HTML contains "Membership" text ✓
+            - VERIFIED: Invoice HTML contains "2,000" or "2000" ✓
+            - VERIFIED: Invoice HTML does NOT contain "₹0" ✓
+            - HTML snippet: "QA Sale Plan (Membership)" with "₹2,000.00"
+            - CORE BUG FIXED: Invoice now shows membership line item with correct amount (was empty/₹0 before)
+            
+            TEST (c) - MEMBERSHIP + SERVICE SALE ✅ PASS (4/4 assertions)
+            - POST /api/salons/{salon_id}/direct-invoice with membership + service
+            - Service price: ₹1500, discounted by 15% = ₹1275
+            - Membership: ₹2000 (NO discount applied to membership itself)
+            - Expected grand_total: ₹1275 + ₹2000 = ₹3275
+            - Response: HTTP 200, token_number="E3"
+            - VERIFIED: grand_total == ₹3275 (matches expected) ✓
+            - VERIFIED: membership_sale == ₹2000 (NOT 0) ✓
+            - GET /api/invoices/{invoice_id}/view returned HTTP 200
+            - VERIFIED: Invoice HTML contains BOTH "Hair Colour" (service) AND "Membership" ✓
+            - VERIFIED: Invoice HTML contains "2,000" (membership amount) ✓
+            - CORE FIX VERIFIED: Plan discount (15%) applied to SERVICE only, NOT to membership line
+            
+            TEST (d) - REGRESSION — SERVICE-ONLY ✅ PASS (4/4 assertions)
+            - POST /api/salons/{salon_id}/direct-invoice with ONLY service (NO membership)
+            - Response: HTTP 200, token_number="E4"
+            - VERIFIED: grand_total == ₹1500 (service price, no membership) ✓
+            - VERIFIED: membership_sale == ₹0 (correct, no membership) ✓
+            - GET /api/invoices/{invoice_id}/view returned HTTP 200
+            - VERIFIED: Invoice HTML contains "Hair Colour" (service line) ✓
+            - VERIFIED: No 500 errors anywhere ✓
+            - REGRESSION OK: Service-only invoices still work correctly
+            
+            CRITICAL REQUIREMENTS MET:
+            ✅ Membership-only sale: grand_total/membership_sale/token.total_amount == ₹2000 (NOT 0)
+            ✅ Membership-only sale appears in /queue with total_amount == ₹2000 (NOT 0)
+            ✅ Public invoice /view HTML contains membership line item "QA Sale Plan (Membership)"
+            ✅ Public invoice /view HTML contains amount "₹2,000.00" (NOT ₹0, NOT empty)
+            ✅ Membership + service sale: grand_total = discounted_service + membership (₹1275 + ₹2000 = ₹3275)
+            ✅ Membership + service invoice shows BOTH service line AND membership line
+            ✅ Plan discount (15%) applied to SERVICE only, NOT to membership line (membership shows full ₹2000)
+            ✅ Service-only invoice still works correctly (regression OK)
+            ✅ No 500 errors anywhere
+            ✅ WhatsApp/Meta in MOCK mode (no real delivery, as expected)
+            
+            ROOT CAUSE FIX VERIFIED:
+            - Backend now reads plan.get("amount") instead of plan.get("price")/"plan_price" → membership_sale_amount=2000 (was 0)
+            - Backend now reads plan.get("discount_percent") instead of plan.get("discount_percentage") → discount applied correctly
+            - generate_and_send_invoice now renders membership line item when token.membership_sale_amount>0
+            - Membership line flagged with is_membership=True to exclude from PART-6 membership-discount guard
+            - Token stores membership_name for invoice rendering
+            
+            The membership sale zero bugfix is production-ready and fully functional. All amounts now show correctly in bookings list, invoice HTML, and WhatsApp messages (MOCK mode).
+  metadata:
+    created_by: "main_agent"
+    version: "1.0"
+    test_sequence: 0
+    run_ui: false
+  test_plan:
+    current_focus:
+      - "Membership sale amount not ₹0 in direct-invoice (bookings list + invoice line item + WhatsApp total)"
+    stuck_tasks: []
+    test_all: false
+    test_priority: "high_first"
+  agent_communication:
+    - agent: "main"
+      message: |
+        Test ONLY membership_sale_zero_bugfix. Salon 71d6d20c-ecb2-43f9-949d-9c10419775ca, admin/salon123
+        (POST /api/salon/users/login {identifier:"admin", password:"salon123"}). Create a membership plan via
+        POST /api/salons/{id}/membership-plans {salon_id, name, amount:2000, credit:500, validity_months:12,
+        terms_conditions:"x", plan_type:"discount", discount_percent:15}. Get a service via
+        GET /api/salons/{id}/services/enabled and a barber via GET /api/salons/{id}/barbers.
+        Verify (a) membership-ONLY direct invoice total == plan.amount (NOT 0) in the response, the token, and /queue;
+        (b) the public invoice /view HTML has a membership line item and the correct amount; (c) membership+service
+        invoice totals = discounted-service + membership amount, with the plan discount% applied to the service only,
+        and the invoice lists BOTH lines; (d) service-only invoice still correct (regression). WhatsApp is MOCK.
+        Clean up any test data you create.
+    - agent: "testing"
+      message: |
+        ✅ BACKEND TESTING COMPLETE - ALL TESTS PASSED (14/14): Comprehensive backend testing completed successfully for membership_sale_zero_bugfix session. Environment: Salon 71d6d20c-ecb2-43f9-949d-9c10419775ca, admin login (admin/salon123). WhatsApp/Meta are in MOCK mode as expected. Test suite: /app/backend_test.py with 14 comprehensive test cases covering all specified scenarios. NO CRITICAL ISSUES FOUND.
+        
+        SUMMARY OF BUG FIX VERIFIED:
+        ✅ TEST (a) - MEMBERSHIP-ONLY SALE (3/3 passed)
+           - totals.grand_total == ₹2000 (NOT 0) ✓
+           - totals.membership_sale == ₹2000 (NOT 0) ✓
+           - token.total_amount == ₹2000 (NOT 0) ✓
+           - Queue shows token with total_amount == ₹2000 (NOT 0) ✓
+           - CORE BUG FIXED: Was showing ₹0, now shows correct ₹2000
+        
+        ✅ TEST (b) - PUBLIC INVOICE VIEW (4/4 passed)
+           - Invoice HTML contains "Membership" line item ✓
+           - Invoice HTML contains "₹2,000.00" amount ✓
+           - Invoice HTML does NOT contain "₹0" ✓
+           - CORE BUG FIXED: Was empty/₹0, now shows membership line with correct amount
+        
+        ✅ TEST (c) - MEMBERSHIP + SERVICE SALE (4/4 passed)
+           - grand_total == ₹3275 (₹1275 discounted service + ₹2000 membership) ✓
+           - membership_sale == ₹2000 (NOT 0) ✓
+           - Invoice shows BOTH service AND membership lines ✓
+           - Plan discount (15%) applied to SERVICE only, NOT to membership ✓
+        
+        ✅ TEST (d) - REGRESSION — SERVICE-ONLY (4/4 passed)
+           - grand_total == ₹1500 (service price, no membership) ✓
+           - membership_sale == ₹0 (correct, no membership) ✓
+           - Invoice shows service line ✓
+           - No 500 errors ✓
+        
+        The membership sale zero bugfix is production-ready and fully functional. All amounts now show correctly in bookings list, invoice HTML, and WhatsApp messages.
