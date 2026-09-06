@@ -1,4 +1,1 @@
 cron=3.0pl1-162
-libgdk-pixbuf-2.0-0=2.42.10+dfsg-1+deb12u4
-libpangocairo-1.0-0=1.50.12+ds-1
-shared-mime-info=2.2-1

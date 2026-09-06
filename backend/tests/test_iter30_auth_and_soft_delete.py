@@ -4,7 +4,7 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://build-deploy-140.preview.emergentagent.com').rstrip('/')
+BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://repo-compiler-4.preview.emergentagent.com').rstrip('/')
 SALON_ID = "f99309ea-7d35-4a33-aabb-8ca20cac7551"
 
 
