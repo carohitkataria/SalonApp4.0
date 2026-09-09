@@ -3078,6 +3078,19 @@ async def meta_whatsapp_webhook(request: Request):
                 try:
                     await db.whatsapp_messages.insert_one(doc)
                     logger.info(f"[meta-wa] stored inbound from {e164} -> salon={salon_id} id={msg_id}")
+                    # B3 — also record into whatsapp_conversations/threads (the
+                    # spec's inbox store + 24h window). mirror=False: we already
+                    # wrote whatsapp_messages above, so don't double-insert.
+                    try:
+                        from marketing import _record_conversation as _rec_conv
+                        await _rec_conv(
+                            salon_id=salon_id, customer_phone=from_wa, direction="in",
+                            text=text_body, wamid=msg_id, timestamp=msg.get("timestamp"),
+                            msg_type=mtype, customer_name=(profile_name or None),
+                            customer_wa_id=from_wa, phone_number_id=phone_number_id,
+                            mirror=False)
+                    except Exception as _rc:
+                        logger.warning(f"[meta-wa] conversation record failed: {_rc}")
                 except Exception as e:
                     logger.warning(f"[meta-wa] insert failed: {e}")
     return {"received": True}

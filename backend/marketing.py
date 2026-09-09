@@ -190,6 +190,120 @@ async def whatsapp_webhook_verify(
     raise HTTPException(status_code=403, detail="Verify token mismatch")
 
 
+# --------- B3: two-way WhatsApp chat (inbound + inbox) helpers ---------
+
+def _digits10(p) -> str:
+    return "".join(ch for ch in str(p or "") if ch.isdigit())[-10:]
+
+
+def _within_24h(iso_ts) -> bool:
+    """True if iso_ts is within the last 24h (customer-service window)."""
+    if not iso_ts:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() <= 24 * 3600
+    except Exception:
+        return False
+
+
+async def _record_conversation(*, salon_id, customer_phone, direction, text,
+                               wamid=None, timestamp=None, msg_type="text",
+                               customer_name=None, customer_wa_id=None,
+                               phone_number_id=None, status=None, mirror=True):
+    """Store one WhatsApp message in whatsapp_conversations and maintain a
+    per-customer thread in whatsapp_threads. direction is 'in' or 'out'."""
+    if not customer_phone and not customer_wa_id:
+        return
+    cp = _digits10(customer_phone or customer_wa_id)
+    wa_id = "".join(ch for ch in str(customer_wa_id or "") if ch.isdigit()) or None
+    now = _now_iso()
+    ts_iso = now
+    try:
+        if timestamp:
+            ts_iso = datetime.fromtimestamp(int(timestamp), tz=timezone.utc).isoformat()
+    except Exception:
+        ts_iso = now
+    # De-dupe inbound by wamid (Meta may retry webhook deliveries).
+    if wamid:
+        try:
+            if await _db.whatsapp_conversations.find_one({"wamid": wamid}, {"_id": 1}):
+                return
+        except Exception:
+            pass
+    doc = {
+        "id": str(uuid.uuid4()),
+        "salon_id": salon_id,
+        "customer_phone": cp,
+        "customer_wa_id": wa_id,
+        "direction": direction,
+        "text": text or "",
+        "msg_type": msg_type,
+        "wamid": wamid,
+        "status": status,
+        "read": (direction == "out"),
+        "timestamp": ts_iso,
+        "created_at": now,
+    }
+    if customer_name:
+        doc["customer_name"] = customer_name
+    if phone_number_id:
+        doc["phone_number_id"] = str(phone_number_id)
+    try:
+        await _db.whatsapp_conversations.insert_one(doc)
+    except Exception as e:
+        logger.warning(f"[WA chat] store failed: {e}")
+        return
+    # Maintain the thread summary (for the inbox + 24h window).
+    set_fields = {"salon_id": salon_id, "customer_phone": cp, "updated_at": now}
+    if wa_id:
+        set_fields["customer_wa_id"] = wa_id
+    if customer_name:
+        set_fields["customer_name"] = customer_name
+    if direction == "in":
+        set_fields["last_inbound_at"] = ts_iso
+    else:
+        set_fields["last_outbound_at"] = ts_iso
+    try:
+        await _db.whatsapp_threads.update_one(
+            {"salon_id": salon_id, "customer_phone": cp},
+            {"$set": set_fields, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"[WA chat] thread upsert failed: {e}")
+
+    # Mirror into whatsapp_messages so the EXISTING Messages inbox + unread badge
+    # surface Meta inbound + replies without needing a separate screen. Phone is
+    # stored as +91XXXXXXXXXX so it groups with the customer's booking activity.
+    # Skipped (mirror=False) when the caller already wrote whatsapp_messages.
+    try:
+        if mirror and salon_id and cp:
+            if wamid:
+                if await _db.whatsapp_messages.find_one({"wamid": wamid}, {"_id": 1}):
+                    return
+            await _db.whatsapp_messages.insert_one({
+                "id": str(uuid.uuid4()),
+                "salon_id": salon_id,
+                "customer_phone": "+91" + cp,
+                "customer_name": customer_name or "",
+                "direction": direction,
+                "text": text or "",
+                "channel": "whatsapp",
+                "provider": "meta",
+                "kind": "message",
+                "status": status,
+                "read": (direction == "out"),
+                "wamid": wamid,
+                "created_at": ts_iso,
+            })
+    except Exception as e:
+        logger.warning(f"[WA chat] mirror to whatsapp_messages failed: {e}")
+
+
+
 @marketing_router.post("/webhooks/whatsapp")
 async def whatsapp_webhook_event(request: Request):
     raw = await request.body()
@@ -246,6 +360,131 @@ async def whatsapp_webhook_event(request: Request):
     except Exception as ex:
         logger.warning(f"[WA Webhook] parse error: {ex}")
     return {"received": True, "signature_valid": True}
+
+
+# ================================================================
+# B3 — Two-way chat inbox API
+# ================================================================
+@marketing_router.get("/salons/{salon_id}/whatsapp/conversations")
+async def wa_list_conversations(salon_id: str, request: Request,
+                                customer_phone: Optional[str] = Query(default=None)):
+    """List WhatsApp chat threads for a salon, or the full message thread for a
+    single customer when `customer_phone` is supplied."""
+    user = await _require_user(request)
+    _assert_salon_scope(user, salon_id)
+
+    if customer_phone:
+        cp = _digits10(customer_phone)
+        msgs = await _db.whatsapp_conversations.find(
+            {"salon_id": salon_id, "customer_phone": cp}, {"_id": 0}
+        ).sort("timestamp", 1).to_list(1000)
+        thread = await _db.whatsapp_threads.find_one(
+            {"salon_id": salon_id, "customer_phone": cp}, {"_id": 0}) or {}
+        # Mark inbound messages as read on open.
+        try:
+            await _db.whatsapp_conversations.update_many(
+                {"salon_id": salon_id, "customer_phone": cp, "direction": "in", "read": {"$ne": True}},
+                {"$set": {"read": True}})
+        except Exception:
+            pass
+        return {
+            "customer_phone": cp,
+            "customer_wa_id": thread.get("customer_wa_id"),
+            "customer_name": thread.get("customer_name"),
+            "messages": msgs,
+            "window_open": _within_24h(thread.get("last_inbound_at")),
+            "last_inbound_at": thread.get("last_inbound_at"),
+        }
+
+    threads = await _db.whatsapp_threads.find(
+        {"salon_id": salon_id}, {"_id": 0}).sort("updated_at", -1).to_list(300)
+    out = []
+    for t in threads:
+        cp = t.get("customer_phone")
+        last = await _db.whatsapp_conversations.find_one(
+            {"salon_id": salon_id, "customer_phone": cp}, {"_id": 0},
+            sort=[("timestamp", -1)]) or {}
+        try:
+            unread = await _db.whatsapp_conversations.count_documents(
+                {"salon_id": salon_id, "customer_phone": cp, "direction": "in", "read": {"$ne": True}})
+        except Exception:
+            unread = 0
+        out.append({
+            "customer_phone": cp,
+            "customer_wa_id": t.get("customer_wa_id"),
+            "customer_name": t.get("customer_name"),
+            "last_text": last.get("text"),
+            "last_direction": last.get("direction"),
+            "last_at": last.get("timestamp"),
+            "last_inbound_at": t.get("last_inbound_at"),
+            "window_open": _within_24h(t.get("last_inbound_at")),
+            "unread": unread,
+        })
+    return {"salon_id": salon_id, "threads": out}
+
+
+@marketing_router.post("/salons/{salon_id}/whatsapp/reply")
+async def wa_reply(salon_id: str, request: Request):
+    """Salon replies to a customer with a free-form text message. Allowed only
+    within the 24-hour customer-service window (outside it, an approved template
+    must be used). Records the outbound message in the thread."""
+    user = await _require_admin(request)
+    _assert_salon_scope(user, salon_id)
+    body = await request.json()
+    cp_raw = (body.get("customer_phone") or "").strip()
+    text = (body.get("text") or "").strip()
+    if not cp_raw or not text:
+        raise HTTPException(status_code=400, detail="customer_phone and text are required")
+    cp = _digits10(cp_raw)
+
+    thread = await _db.whatsapp_threads.find_one(
+        {"salon_id": salon_id, "customer_phone": cp}, {"_id": 0}) or {}
+    if not _within_24h(thread.get("last_inbound_at")):
+        raise HTTPException(
+            status_code=400,
+            detail="Outside the 24-hour window — send an approved template instead.")
+
+    # Recipient wa_id: use the stored full wa_id if we have it, else assume +91.
+    to = (thread.get("customer_wa_id") or "").strip() or ("91" + cp)
+
+    try:
+        from whatsapp_service import send_meta_text
+        res = await send_meta_text(to, text, salon_id=salon_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Send failed: {e}")
+
+    wamid = None
+    try:
+        msgs = (res or {}).get("messages") or []
+        if msgs and isinstance(msgs, list):
+            wamid = (msgs[0] or {}).get("id")
+        wamid = wamid or (res or {}).get("provider_message_id")
+    except Exception:
+        wamid = None
+
+    await _record_conversation(
+        salon_id=salon_id, customer_phone=cp, direction="out", text=text,
+        wamid=wamid, customer_wa_id=to, status=(res or {}).get("status"))
+
+    ok = str((res or {}).get("status") or "").lower() not in ("failed", "error")
+    return {"ok": ok, "result": res}
+
+
+@marketing_router.post("/salons/{salon_id}/whatsapp/conversations/read")
+async def wa_mark_read(salon_id: str, request: Request):
+    """Mark a customer's inbound messages as read (clears the unread badge)."""
+    user = await _require_user(request)
+    _assert_salon_scope(user, salon_id)
+    body = await request.json()
+    cp = _digits10(body.get("customer_phone") or "")
+    if not cp:
+        raise HTTPException(status_code=400, detail="customer_phone is required")
+    res = await _db.whatsapp_conversations.update_many(
+        {"salon_id": salon_id, "customer_phone": cp, "direction": "in", "read": {"$ne": True}},
+        {"$set": {"read": True}})
+    return {"ok": True, "updated": res.modified_count}
+
+
 
 
 # ================================================================

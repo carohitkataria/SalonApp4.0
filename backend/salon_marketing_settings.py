@@ -540,6 +540,46 @@ def _graph_base() -> str:
     return f"https://graph.facebook.com/{api}"
 
 
+def _conn_is_live(conn: Dict[str, Any]) -> bool:
+    """B1 — A connection is LIVE whenever it holds a REAL (non-`mock_`) access
+    token + phone_number_id. This is independent of `_meta_enabled()` (the
+    platform app secret), which is only needed for embedded-signup's OAuth code
+    exchange — NOT for sending or template provisioning."""
+    if not conn:
+        return False
+    tok = str(conn.get("access_token") or "")
+    return bool(tok and conn.get("phone_number_id") and not tok.startswith("mock"))
+
+
+def _token_is_live(access_token: Optional[str]) -> bool:
+    """Real (non-mock) token check used by provisioning paths."""
+    tok = str(access_token or "")
+    return bool(tok and not tok.startswith("mock"))
+
+
+async def _subscribe_app_to_waba(waba_id: str, access_token: str) -> Dict[str, Any]:
+    """B2 — Subscribe OUR app to the salon's WABA so Meta POSTs inbound events to
+    our webhook. Best-effort: never raise (retry-able); just log and return the
+    result. Skipped for mock tokens / missing ids."""
+    if not (waba_id and _token_is_live(access_token)):
+        return {"skipped": True}
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(
+                f"{_graph_base()}/{waba_id}/subscribed_apps",
+                params={"access_token": access_token},
+            )
+        try:
+            body = r.json()
+        except Exception:
+            body = {"text": r.text}
+        logger.info(f"[WA subscribe] waba={waba_id} http={r.status_code} resp={body}")
+        return {"http_status": r.status_code, "resp": body}
+    except Exception as e:
+        logger.warning(f"[WA subscribe] waba={waba_id} failed: {e}")
+        return {"error": str(e)}
+
+
 async def provision_templates_for_waba(waba_id: str, access_token: str) -> List[Dict[str, Any]]:
     """Phase 3.3 — push the platform's standard template library onto a salon's
     WABA. Called on WABA connect and from the library "Use" action. Returns a
@@ -558,8 +598,9 @@ async def provision_templates_for_waba(waba_id: str, access_token: str) -> List[
     if not lib:
         return out
     base = _graph_base()
-    if not (_meta_enabled() and access_token and not str(access_token).startswith("mock")):
-        # Mock provision — no network calls.
+    if not _token_is_live(access_token):
+        # Mock provision — no network calls. Only for mock_ tokens (B1: a real
+        # token provisions for real even without the platform app secret).
         for t in lib:
             out.append({"name": t.get("name"), "status": "mock", "resp": {"mock": True}})
         return out
@@ -792,6 +833,10 @@ async def waba_manual_connect(salon_id: str, body: ManualConnectIn, request: Req
         upsert=True,
     )
 
+    # B2 — subscribe OUR app to the salon's WABA so inbound events reach our
+    # webhook. Best-effort; a failure here must not fail the connect.
+    subscribe_resp = await _subscribe_app_to_waba(waba_id, access_token)
+
     provisioned = []
     try:
         provisioned = await provision_templates_for_waba(waba_id, access_token)
@@ -808,6 +853,7 @@ async def waba_manual_connect(salon_id: str, body: ManualConnectIn, request: Req
         "sender_phone_e164": sender,
         "display_name": display,
         "templates_provisioned": provisioned,
+        "subscribed": subscribe_resp,
     }
 
 
@@ -863,7 +909,7 @@ async def waba_meta_spend(salon_id: str, request: Request):
     connected = bool(conn.get("waba_id") and conn.get("phone_number_id"))
     if not connected:
         return {"connected": False, "status": conn.get("status") or "none"}
-    live = _meta_enabled() and conn.get("access_token") and not str(conn.get("access_token")).startswith("mock")
+    live = _conn_is_live(conn)
     # Best-effort: sent conversations from our own message log this month.
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -905,7 +951,7 @@ async def use_library_template(salon_id: str, lib_id: str, request: Request):
     waba_id = conn.get("waba_id")
     now = _now_iso()
 
-    live = _meta_enabled() and access_token and not str(access_token).startswith("mock")
+    live = _token_is_live(access_token)
     if not live:
         status = "mock"
         resp: Dict[str, Any] = {"mock": True}
@@ -967,7 +1013,7 @@ async def adopt_library_template(salon_id: str, lib_id: str, request: Request):
     access_token = conn.get("access_token")
     waba_id = conn.get("waba_id")
     now = _now_iso()
-    live = _meta_enabled() and access_token and not str(access_token).startswith("mock")
+    live = _token_is_live(access_token)
     if not live:
         status: Any = "mock"
         resp: Dict[str, Any] = {"mock": True}
