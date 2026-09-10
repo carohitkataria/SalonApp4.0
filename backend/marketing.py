@@ -357,6 +357,46 @@ async def whatsapp_webhook_event(request: Request):
                     await _db.marketing_messages.update_one(
                         {"provider_message_id": wa_msg_id}, {"$set": fields}
                     )
+
+                # Inbound customer messages (two-way chat on the salon's OWN
+                # WABA number). Route strictly by the receiving phone_number_id
+                # -> salon_channel_connections, so each reply lands on the
+                # correct salon. _record_conversation stores into
+                # whatsapp_conversations/threads and mirrors to
+                # whatsapp_messages (same inbox as the default-number chat);
+                # it also de-dupes on wamid (Meta retries webhooks).
+                messages = value.get("messages") or []
+                if messages:
+                    meta = value.get("metadata") or {}
+                    pnid = meta.get("phone_number_id")
+                    conn = await _db.salon_channel_connections.find_one(
+                        {"phone_number_id": pnid}, {"_id": 0, "salon_id": 1})
+                    salon_id = conn.get("salon_id") if conn else None
+                    if salon_id:
+                        contacts = value.get("contacts") or []
+                        profile_name = ""
+                        if contacts:
+                            profile_name = (((contacts[0] or {}).get("profile") or {}).get("name")) or ""
+                        for m in messages:
+                            frm = m.get("from")                       # customer's wa id (digits)
+                            wamid = m.get("id")
+                            mtype = m.get("type")
+                            if mtype == "text":
+                                text = ((m.get("text") or {}).get("body")) or ""
+                            else:
+                                text = f"[{mtype} message]"            # media/location/etc placeholder
+                            await _record_conversation(
+                                salon_id=salon_id,
+                                customer_phone=frm,
+                                direction="in",
+                                text=text,
+                                wamid=wamid,
+                                timestamp=m.get("timestamp"),
+                                msg_type=mtype or "text",
+                                customer_name=profile_name or None,
+                                customer_wa_id=frm,
+                                phone_number_id=pnid,
+                            )
     except Exception as ex:
         logger.warning(f"[WA Webhook] parse error: {ex}")
     return {"received": True, "signature_valid": True}
