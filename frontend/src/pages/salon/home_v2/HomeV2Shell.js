@@ -135,6 +135,23 @@ export default function HomeV2Shell({
     if (_unreadData && typeof _unreadData.count === 'number') setMsgCount(_unreadData.count);
   }, [_unreadData]);
 
+  // Live Reply Toast — when the unread guest-message count rises (a new inbound
+  // WhatsApp reply arrived) and the Messages drawer is closed, pop a toast so
+  // staff never miss a waiting customer. Poll cadence is the 12s unread poll.
+  const prevMsgCountRef = useRef(null);
+  useEffect(() => {
+    const prev = prevMsgCountRef.current;
+    if (prev !== null && msgCount > prev && !messagesOpen) {
+      const delta = msgCount - prev;
+      toast.message(
+        delta === 1 ? 'New WhatsApp message from a guest'
+                    : `${delta} new WhatsApp messages from guests`,
+        { description: 'Tap to open Guest Messages',
+          action: { label: 'Open', onClick: () => setMessagesOpen(true) } });
+    }
+    prevMsgCountRef.current = msgCount;
+  }, [msgCount, messagesOpen]);
+
   // Mobile "More" bottom-sheet state (Phase 2)
   const [moreOpen, setMoreOpen] = useState(false);
 

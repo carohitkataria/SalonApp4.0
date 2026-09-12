@@ -31,10 +31,6 @@ import httpx
 from twilio_service import (
     send_whatsapp_otp, 
     send_whatsapp_notification,
-    send_booking_confirmation_template,
-    send_booking_completed_template,
-    send_your_turn_now_template,
-    send_token_approaching_template,
     verify_whatsapp_otp,
     format_token_cancelled,
     format_token_rescheduled,
@@ -2832,136 +2828,11 @@ async def _salon_has_own_sender(salon_id: str) -> bool:
     return wa.get("mode") == "own" and wa.get("status") == "active" and bool(wa.get("sender_number"))
 
 
-@api_router.post("/whatsapp/twilio-inbound")
-async def twilio_inbound_whatsapp(request: Request):
-    """WS — Twilio inbound WhatsApp webhook. Twilio POSTs form-encoded data when
-    a customer sends a WhatsApp message to our sender. We persist it into
-    ``whatsapp_messages`` (direction='in') so it appears in the salon's platform
-    chat. Public + unauthenticated by design (Twilio calls it).
-
-    Signature is validated softly: an invalid signature is logged but the message
-    is still processed, so real customer replies are never silently dropped due
-    to proxy URL-reconstruction quirks."""
-    try:
-        form = await request.form()
-        params = {k: str(v) for k, v in form.multi_items()} if hasattr(form, "multi_items") else dict(form)
-    except Exception as e:
-        logger.warning(f"[wa-inbound] could not parse form: {e}")
-        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                        media_type="application/xml")
-
-    # --- soft signature validation ---
-    try:
-        from twilio.request_validator import RequestValidator
-        auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-        signature = request.headers.get("X-Twilio-Signature")
-        if auth_token and signature:
-            proto = request.headers.get("x-forwarded-proto", "https")
-            host = request.headers.get("x-forwarded-host") or request.headers.get("host")
-            public_url = f"{proto}://{host}{request.url.path}"
-            ok = RequestValidator(auth_token).validate(public_url, params, signature)
-            if not ok:
-                logger.warning(f"[wa-inbound] signature check failed for url={public_url} (processing anyway)")
-    except Exception as e:
-        logger.warning(f"[wa-inbound] signature validation error: {e}")
-
-    # Twilio can deliver inbound WhatsApp in two shapes depending on how the
-    # sender/messaging-service is wired:
-    #   (a) standard Messaging webhook  -> From / Body / MessageSid / ProfileName
-    #   (b) Conversations webhook        -> EventType=onMessageAdded / Author / Body
-    # Normalise both into the same variables so we always capture the message.
-    event_type = params.get("EventType") or ""
-    is_conversations = bool(event_type)
-    our_sender_digits = _last10(os.environ.get("TWILIO_WHATSAPP_NUMBER", ""))
-
-    if is_conversations:
-        # Only care about newly-added messages.
-        if event_type != "onMessageAdded":
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                            media_type="application/xml")
-        from_number = params.get("Author", "")           # whatsapp:+9179…
-        # Skip echoes of our own business/outbound messages.
-        if _last10(from_number) == our_sender_digits:
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                            media_type="application/xml")
-        to_number = os.environ.get("TWILIO_WHATSAPP_NUMBER", "")
-        body = params.get("Body", "") or ""
-        profile_name = ""
-        wa_id = _last10(from_number)
-        message_sid = params.get("MessageSid") or params.get("Sid") or ""
-        num_media = 0
-        media_urls = []
-    else:
-        from_number = params.get("From", "")            # whatsapp:+9179…
-        to_number = params.get("To", "")
-        body = params.get("Body", "") or ""
-        profile_name = params.get("ProfileName") or ""
-        wa_id = params.get("WaId") or ""
-        message_sid = params.get("MessageSid") or params.get("SmsSid") or ""
-        # Ignore any inbound that is actually our own number (safety).
-        if _last10(from_number) and _last10(from_number) == our_sender_digits:
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                            media_type="application/xml")
-        num_media = 0
-        try:
-            num_media = int(params.get("NumMedia", "0"))
-        except Exception:
-            num_media = 0
-        # Media (images/docs) — represent as a short text note if no body.
-        media_urls = [params.get(f"MediaUrl{i}") for i in range(num_media) if params.get(f"MediaUrl{i}")]
-        if not body and media_urls:
-            body = f"[media] {media_urls[0]}"
-
-    cust_digits = _last10(from_number or wa_id)
-    e164 = ""
-    try:
-        e164 = _normalize_phone_e164(from_number.replace("whatsapp:", "").strip())
-    except Exception:
-        e164 = "+" + re.sub(r"\D", "", from_number)
-
-    # De-duplicate on MessageSid (Twilio retries webhooks).
-    if message_sid:
-        existing = await db.whatsapp_messages.find_one({"message_sid": message_sid}, {"_id": 1})
-        if existing:
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                            media_type="application/xml")
-
-    salon_id = await _route_inbound_to_salon(cust_digits)
-
-    # Item 6 — drop inbound replies for salons that have NOT configured their own
-    # WhatsApp sender. Those salons only use the shared platform sender for
-    # outbound notifications and therefore cannot receive customer messages.
-    if not await _salon_has_own_sender(salon_id):
-        logger.info(f"[wa-inbound] dropped inbound from {e164}: salon={salon_id} has no own sender configured")
-        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                        media_type="application/xml")
-
-    now = datetime.now(timezone.utc).isoformat()
-    doc = {
-        "id": str(uuid.uuid4()),
-        "salon_id": salon_id,
-        "customer_phone": e164 or cust_digits,
-        "customer_name": profile_name or "Guest",
-        "direction": "in",
-        "text": body,
-        "channel": "whatsapp",
-        "provider": "twilio",
-        "kind": "message",
-        "status": "received",
-        "read": False,
-        "message_sid": message_sid,
-        "wa_id": wa_id,
-        "to_number": to_number,
-        "created_at": now,
-    }
-    try:
-        await db.whatsapp_messages.insert_one(doc)
-        logger.info(f"[wa-inbound] stored msg from {e164} -> salon={salon_id} sid={message_sid}")
-    except Exception as e:
-        logger.warning(f"[wa-inbound] insert failed: {e}")
-
-    return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                    media_type="application/xml")
+# NOTE (Meta-only cutover): the Twilio inbound WhatsApp webhook
+# (POST /whatsapp/twilio-inbound) was removed. Inbound customer messages
+# now flow exclusively through the Meta Cloud API webhook
+# (meta_whatsapp_webhook / marketing.whatsapp_webhook_event). Twilio is kept
+# ONLY for SMS/email + OTP.
 
 
 # ---------------------------------------------------------------------------
@@ -3031,6 +2902,13 @@ async def meta_whatsapp_webhook(request: Request):
             meta_md = value.get("metadata") or {}
             phone_number_id = meta_md.get("phone_number_id")
             salon_id = await _route_inbound_to_salon_by_phone_id(phone_number_id)
+            # Guardrail — drop events whose receiving number maps to NO salon,
+            # so a stray/unknown phone_number_id never creates an ownerless
+            # (salon_id=None) message row.
+            if not salon_id:
+                if value.get("messages"):
+                    logger.info(f"[meta-wa] dropped inbound: phone_number_id={phone_number_id} maps to no salon")
+                continue
             contacts = value.get("contacts") or []
             profile_name = ""
             if contacts:
@@ -3040,6 +2918,15 @@ async def meta_whatsapp_webhook(request: Request):
                 from_wa = msg.get("from") or ""
                 mtype = msg.get("type")
                 text_body = ""
+                # Inline media (Inline Media feature) — capture a reference to the
+                # media so the chat can render an attachment chip. Actual bytes are
+                # fetched from Meta only in prod (where creds live); here we store
+                # the media id + mime + caption reference.
+                media_type = None
+                media_id = None
+                media_mime = None
+                media_caption = None
+                media_filename = None
                 if mtype == "text":
                     text_body = ((msg.get("text") or {}).get("body")) or ""
                 elif mtype == "button":
@@ -3048,6 +2935,14 @@ async def meta_whatsapp_webhook(request: Request):
                     inter = msg.get("interactive") or {}
                     text_body = (((inter.get("button_reply") or {}).get("title"))
                                  or ((inter.get("list_reply") or {}).get("title")) or "")
+                elif mtype in ("image", "video", "document", "audio", "voice", "sticker"):
+                    _mo = msg.get(mtype) or {}
+                    media_type = mtype
+                    media_id = _mo.get("id")
+                    media_mime = _mo.get("mime_type")
+                    media_caption = _mo.get("caption")
+                    media_filename = _mo.get("filename")
+                    text_body = media_caption or f"[{mtype}]"
                 else:
                     text_body = f"[{mtype or 'message'}]"
                 # De-dupe on Meta message id.
@@ -3075,6 +2970,15 @@ async def meta_whatsapp_webhook(request: Request):
                     "to_number": phone_number_id,
                     "created_at": now,
                 }
+                # Attach inline-media reference (Inline Media) so the chat can
+                # render an attachment chip. Bytes are fetched from Meta in prod.
+                if media_type:
+                    doc["media_type"] = media_type
+                    doc["media_id"] = media_id
+                    doc["media_mime"] = media_mime
+                    doc["media_filename"] = media_filename
+                    if media_caption:
+                        doc["caption"] = media_caption
                 try:
                     await db.whatsapp_messages.insert_one(doc)
                     logger.info(f"[meta-wa] stored inbound from {e164} -> salon={salon_id} id={msg_id}")
@@ -3390,18 +3294,16 @@ async def _send_booking_notification_impl(token_data: dict, notification_type: s
                     f"WhatsApp notification suppressed for {phone} (setting {whatsapp_setting_key} is OFF)"
                 )
                 return
-            result = await send_booking_confirmation_template(
-                phone_number=phone,
+            result = await send_meta_booking_confirmation(
+                phone=phone,
                 customer_name=customer_name or 'Customer',
                 salon_name=salon_name,
                 token_number=token_data.get('token_number', 0),
                 date=token_data.get('date') or '',
-                # `time_slot` may be None on bookings that only picked a shift.
-                # Twilio Content Templates reject empty variables → fall back to
-                # the shift name (e.g. "Morning") so the template always renders.
                 time_slot=(token_data.get('time_slot') or token_data.get('shift') or 'TBD'),
                 barber_name=(token_data.get('barber_name') or 'Any available'),
                 salon=salon,
+                salon_id=token_data.get('salon_id'),
             )
             await record_whatsapp_send(token_data.get('salon_id',''), 'booking_confirmation', phone, result, salon)
             logger.info(
@@ -3422,14 +3324,15 @@ async def _send_booking_notification_impl(token_data: dict, notification_type: s
                     f"WhatsApp suppressed by customer settings for {phone} (whatsapp_booking_status_change OFF)"
                 )
                 return
-            result = await send_booking_completed_template(
-                phone_number=phone,
+            result = await send_meta_booking_completed(
+                phone=phone,
                 customer_name=customer_name or 'Customer',
                 salon_name=salon_name,
                 token_number=token_data.get('token_number', 0),
                 barber_name=token_data.get('barber_name') or '',
                 amount=token_data.get('total_amount') or token_data.get('amount') or 0,
                 salon=salon,
+                salon_id=token_data.get('salon_id'),
             )
             await record_whatsapp_send(token_data.get('salon_id',''), 'booking_completed', phone, result, salon)
             logger.info(
@@ -3451,13 +3354,14 @@ async def _send_booking_notification_impl(token_data: dict, notification_type: s
                     f"WhatsApp suppressed by customer settings for {phone} (whatsapp_turn_approaching OFF)"
                 )
                 return
-            result = await send_your_turn_now_template(
-                phone_number=phone,
+            result = await send_meta_your_turn_now(
+                phone=phone,
                 customer_name=customer_name or 'Customer',
                 salon_name=salon_name,
                 barber_name=token_data.get('barber_name') or 'your stylist',
                 token_number=token_data.get('token_number', 0),
                 salon=salon,
+                salon_id=token_data.get('salon_id'),
             )
             await record_whatsapp_send(token_data.get('salon_id',''), 'your_turn_now', phone, result, salon)
             logger.info(
@@ -3599,8 +3503,8 @@ async def check_and_notify_nearby_tokens(salon_id: str, barber_id: str, date: st
                     salon_doc = await db.salons.find_one({"id": salon_id}, {"_id": 0})
                     salon_name_for_msg = (salon_doc or {}).get("name") or (salon_doc or {}).get("salon_name") or "the salon"
 
-                    _ta_result = await send_token_approaching_template(
-                        phone_number=phone,
+                    _ta_result = await send_meta_token_approaching(
+                        phone=phone,
                         customer_name=token.get('customer_name') or 'Customer',
                         token_number=token_number,
                         tokens_away=tokens_away,
@@ -3608,6 +3512,7 @@ async def check_and_notify_nearby_tokens(salon_id: str, barber_id: str, date: st
                         barber_name=token.get('barber_name') or 'your stylist',
                         current_serving=current_serving,
                         salon=salon_doc,
+                        salon_id=salon_id,
                     )
                     await record_whatsapp_send(salon_id, 'token_approaching', phone, _ta_result or {}, salon_doc)
 
@@ -3634,6 +3539,102 @@ async def _event_template(salon_id: str, event: str, default_name: str) -> str:
     except Exception:
         pass
     return default_name
+
+
+# ---------------------------------------------------------------------------
+# Meta-only transactional WhatsApp senders (WhatsApp cutover).
+# These replace the retired Twilio Content-template senders. Each resolves the
+# salon's chosen template (event->template binding via _event_template, else a
+# sensible default seeded in the platform template library), builds the body
+# params in the template's placeholder order, and sends via the salon's OWN
+# Meta connection (whatsapp_service.send_meta_template, salon_id-scoped).
+#
+# Part 4 guardrail: if the salon has NO real Meta connection, we DO NOT silently
+# mock or fall back to Twilio — we return {"status":"no_connection"} so the
+# failure is visible in record_whatsapp_send / logs.
+# ---------------------------------------------------------------------------
+async def send_meta_booking_confirmation(*, phone, customer_name, salon_name,
+                                         token_number, date, time_slot,
+                                         barber_name, salon=None, salon_id=None) -> dict:
+    from whatsapp_service import has_meta_connection, send_meta_template
+    sid = salon_id or (salon or {}).get("id")
+    name = await _event_template(sid, "booking_confirmation", "booking_confirmation")
+    if not await has_meta_connection(sid):
+        logger.warning(f"[meta-send] booking_confirmation NOT sent — salon={sid} not connected")
+        return {"status": "no_connection", "provider": "meta", "template": name}
+    when = " ".join([x for x in [str(date or ""), str(time_slot or "")] if x]).strip() or "TBD"
+    # booking_confirmation template body: {{1}} name, {{2}} salon, {{3}} when
+    body = [customer_name or "Customer", salon_name or "our salon", when]
+    try:
+        return await send_meta_template(to=phone, template_name=name,
+                                        body_params=body, salon_id=sid)
+    except Exception as e:
+        return {"status": "failed", "provider": "meta", "error": str(e)}
+
+
+async def send_meta_booking_completed(*, phone, customer_name, salon_name,
+                                      token_number, barber_name, amount,
+                                      salon=None, salon_id=None) -> dict:
+    from whatsapp_service import has_meta_connection, send_meta_template
+    sid = salon_id or (salon or {}).get("id")
+    name = await _event_template(sid, "booking_completed", "booking_completed")
+    if not await has_meta_connection(sid):
+        logger.warning(f"[meta-send] booking_completed NOT sent — salon={sid} not connected")
+        return {"status": "no_connection", "provider": "meta", "template": name}
+    try:
+        amt = float(amount or 0)
+        amount_str = str(int(amt)) if amt.is_integer() else f"{amt:.2f}"
+    except Exception:
+        amount_str = str(amount or 0)
+    # booking_completed template body: {{1}} salon, {{2}} name, {{3}} token, {{4}} barber, {{5}} amount
+    body = [salon_name or "our salon", customer_name or "Customer",
+            str(token_number), barber_name or "our stylist", amount_str]
+    try:
+        return await send_meta_template(to=phone, template_name=name,
+                                        body_params=body, salon_id=sid)
+    except Exception as e:
+        return {"status": "failed", "provider": "meta", "error": str(e)}
+
+
+async def send_meta_your_turn_now(*, phone, customer_name, salon_name,
+                                  barber_name, token_number,
+                                  salon=None, salon_id=None) -> dict:
+    from whatsapp_service import has_meta_connection, send_meta_template
+    sid = salon_id or (salon or {}).get("id")
+    name = await _event_template(sid, "your_turn", "your_turn_next")
+    if not await has_meta_connection(sid):
+        logger.warning(f"[meta-send] your_turn_next NOT sent — salon={sid} not connected")
+        return {"status": "no_connection", "provider": "meta", "template": name}
+    # your_turn_next template body: {{1}} name, {{2}} token, {{3}} salon
+    body = [customer_name or "Customer", str(token_number), salon_name or "the salon"]
+    try:
+        return await send_meta_template(to=phone, template_name=name,
+                                        body_params=body, salon_id=sid)
+    except Exception as e:
+        return {"status": "failed", "provider": "meta", "error": str(e)}
+
+
+async def send_meta_token_approaching(*, phone, customer_name, token_number,
+                                      tokens_away, salon_name="", barber_name="",
+                                      current_serving="", salon=None, salon_id=None) -> dict:
+    from whatsapp_service import has_meta_connection, send_meta_template
+    sid = salon_id or (salon or {}).get("id")
+    name = await _event_template(sid, "reminder", "token_approaching")
+    if not await has_meta_connection(sid):
+        logger.warning(f"[meta-send] token_approaching NOT sent — salon={sid} not connected")
+        return {"status": "no_connection", "provider": "meta", "template": name}
+    tokens_away_str = f"{tokens_away} token" if str(tokens_away) == "1" else f"{tokens_away} tokens"
+    # token_approaching template body: {{1}} name, {{2}} tokens_away, {{3}} salon,
+    #   {{4}} token, {{5}} barber, {{6}} now-serving
+    body = [customer_name or "Customer", tokens_away_str, salon_name or "the salon",
+            str(token_number), barber_name or "your stylist",
+            str(current_serving) if current_serving else "—"]
+    try:
+        return await send_meta_template(to=phone, template_name=name,
+                                        body_params=body, salon_id=sid)
+    except Exception as e:
+        return {"status": "failed", "provider": "meta", "error": str(e)}
+
 
 
 # ---------------------------------------------------------------------------
@@ -12592,6 +12593,12 @@ async def get_conversations(salon_id: str, current_user=Depends(get_current_salo
             "kind": m.get("kind") or "message",
             "channel": m.get("channel") or "whatsapp",
             "provider": m.get("provider"),
+            # Inline media reference (rendered as an attachment chip in the chat).
+            "media_type": m.get("media_type"),
+            "media_id": m.get("media_id"),
+            "media_mime": m.get("media_mime"),
+            "media_filename": m.get("media_filename"),
+            "caption": m.get("caption"),
             "ts": ts, "tm": _fmt_time(ts),
         })
         if m.get("direction") == "in" and not m.get("read"):

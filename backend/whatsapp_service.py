@@ -92,6 +92,18 @@ def is_meta_configured() -> bool:
     )
 
 
+async def has_meta_connection(salon_id: Optional[str] = None) -> bool:
+    """Part 4 guardrail — True only when a REAL Meta connection exists for this
+    salon (or platform env), i.e. a phone_number_id + a non-mock access token.
+    Used to fail loudly (no silent mock / Twilio fallback) when a salon hasn't
+    connected its WhatsApp."""
+    try:
+        pnid, token, _waba = await _resolve_meta_creds(salon_id)
+    except Exception:
+        return False
+    return bool(pnid and token and not str(token).startswith("mock"))
+
+
 # ---------- Helpers ----------
 
 def _normalize_e164(phone: str) -> str:
@@ -235,41 +247,23 @@ async def send_whatsapp_message(
     * `header_params` lets a template send include a media header (image/video/
       document) — e.g. [{"type":"image","image":{"link": PUBLIC_URL}}].
     * Returns a dict {status, provider, ...}
+
+    Meta-only (WhatsApp cutover): Twilio is no longer used for WhatsApp. Twilio
+    remains ONLY for SMS/email + OTP (those live in twilio_service directly).
+    `force_provider` is accepted for backwards-compatibility but ignored.
     """
-    provider = (force_provider or get_active_provider()).lower()
-
-    if provider == "meta":
-        if template_name:
-            return await send_meta_template(
-                to,
-                template_name=template_name,
-                lang_code=lang_code,
-                body_params=template_params or [],
-                header_params=header_params,
-                salon_id=salon_id,
-            )
-        if text:
-            return await send_meta_text(to, text, salon_id=salon_id)
-        return {"status": "failed", "provider": "meta", "reason": "empty_message"}
-
-    # Twilio path — reuse the existing twilio_service helpers.
-    try:
-        from twilio_service import send_whatsapp_notification  # async, dict-returning
-        body = text or (f"[{template_name}] " + " | ".join(template_params or []))
-        result = await send_whatsapp_notification(_normalize_e164(to), body)
-        # Normalise shape — twilio_service returns e.g. {"success": True/False, "sid": ...}
-        if isinstance(result, dict):
-            status = "sent" if result.get("success") or result.get("status") == "sent" else "failed"
-            return {
-                "status": status,
-                "provider": "twilio",
-                "message_id": result.get("sid") or result.get("message_id"),
-                "raw": result,
-            }
-        return {"status": "sent" if result else "failed", "provider": "twilio"}
-    except Exception as e:
-        logger.warning(f"[WhatsApp] Twilio send fallback failed: {e}")
-        return {"status": "failed", "provider": "twilio", "error": str(e)}
+    if template_name:
+        return await send_meta_template(
+            to,
+            template_name=template_name,
+            lang_code=lang_code,
+            body_params=template_params or [],
+            header_params=header_params,
+            salon_id=salon_id,
+        )
+    if text:
+        return await send_meta_text(to, text, salon_id=salon_id)
+    return {"status": "failed", "provider": "meta", "reason": "empty_message"}
 
 
 # ---------- Webhook signature verification ----------

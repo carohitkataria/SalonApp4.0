@@ -235,14 +235,19 @@ async def owner_send_test(salon_id: str, body: TestSendIn, request: Request):
     if not to.startswith("+"):
         to = "+" + to.lstrip("0")
 
-    from twilio_service import send_your_turn_now_template
     salon_name = salon.get("salon_name") or salon.get("name") or "Your salon"
-    result = await send_your_turn_now_template(
-        phone_number=to,
-        customer_name="Owner Test",
-        salon_name=salon_name,
-        barber_name="Test",
-        token_number="0",
-        salon=salon,
+    # Meta-only cutover: send the test via the salon's own Meta WABA.
+    try:
+        from whatsapp_service import has_meta_connection, send_meta_template
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"WhatsApp module error: {e}")
+    if not await has_meta_connection(salon_id):
+        return {"ok": False, "result": {"status": "no_connection",
+                "reason": "salon_not_connected"}}
+    result = await send_meta_template(
+        to=to,
+        template_name="your_turn_next",
+        body_params=["Owner Test", "0", salon_name],
+        salon_id=salon_id,
     )
     return {"ok": result.get("status") in ("sent", "mock"), "result": result}

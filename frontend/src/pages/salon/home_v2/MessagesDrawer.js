@@ -56,6 +56,9 @@ const CSS = `
 .msgdrw .bub.ref{align-self:center;background:#F1EEFF;border:1px dashed #E0D8FA;color:#5B3FD1;font-weight:600;font-size:11.5px;max-width:88%;text-align:center}
 .msgdrw .wa-tag{display:inline-flex;align-items:center;gap:3px;font-size:8.5px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;color:#128C3E;background:#D7F5E3;padding:1px 5px;border-radius:5px}
 .msgdrw .wa-tag svg{width:9px;height:9px;fill:currentColor;stroke:none}
+.msgdrw .media-chip{display:inline-flex;align-items:center;gap:7px;margin-bottom:5px;padding:7px 10px;border-radius:10px;background:#F1EEFF;border:1px solid #E0D8FA;color:#5B3FD1;font-size:12px;font-weight:700;max-width:100%}
+.msgdrw .media-chip .mc-ic{font-size:15px;line-height:1}
+.msgdrw .media-chip .mc-tx{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .msgdrw .thread__in{border-top:1px solid #ECE9F5;background:#fff;padding:12px 16px;display:flex;flex-direction:column;gap:9px}
 .msgdrw .tmpl-row{display:flex;align-items:center;gap:8px}
 .msgdrw .tmpl-row select{flex:1;border:1px solid #E7E3F2;border-radius:10px;padding:8px 10px;font-size:12.5px;color:#4B4468;background:#FAF9FD;outline:none;cursor:pointer}
@@ -75,8 +78,31 @@ const WaIcon = () => (
 );
 
 const WaTag = () => (
-  <span className="wa-tag" title="Sent on WhatsApp via Twilio"><WaIcon /> WhatsApp · Twilio</span>
+  <span className="wa-tag" title="Sent on WhatsApp"><WaIcon /> WhatsApp</span>
 );
+
+// Inline media attachment chip (Inline Media). In prod the media bytes are
+// fetched from Meta; here we render a clear, typed attachment reference.
+const MediaChip = ({ m }) => {
+  const t = (m.media_type || '').toLowerCase();
+  const label = t === 'image' ? 'Photo'
+    : t === 'video' ? 'Video'
+    : t === 'document' ? (m.media_filename || 'Document')
+    : (t === 'audio' || t === 'voice') ? 'Voice message'
+    : t === 'sticker' ? 'Sticker'
+    : 'Attachment';
+  const glyph = t === 'image' ? '🖼️'
+    : t === 'video' ? '🎬'
+    : t === 'document' ? '📎'
+    : (t === 'audio' || t === 'voice') ? '🎤'
+    : t === 'sticker' ? '💟' : '📎';
+  return (
+    <div className="media-chip" data-testid="messages-media-chip" title={m.media_mime || label}>
+      <span className="mc-ic">{glyph}</span>
+      <span className="mc-tx">{label}</span>
+    </div>
+  );
+};
 
 export default function MessagesDrawer({ open, onClose, salonId, getAuthHeaders, onUnreadChange }) {
   const [convos, setConvos] = useState([]);
@@ -169,14 +195,15 @@ export default function MessagesDrawer({ open, onClose, salonId, getAuthHeaders,
     if (!text || !active) return;
     setSending(true);
     // optimistic
-    const optimistic = { f: 'out', t: text, tm: 'now', channel: 'whatsapp', provider: 'twilio' };
+    const optimistic = { f: 'out', t: text, tm: 'now', channel: 'whatsapp', provider: 'meta' };
     setConvos((arr) => arr.map((c) => c.phone === active.phone ? { ...c, msgs: [...c.msgs, optimistic], last: text } : c));
     setDraft('');
     try {
       const { data } = await axios.post(`${API}/salons/${salonId}/conversations/${active.phone}/send`,
         { text, customer_name: active.name }, { headers: headers() });
       if (data?.send_status === 'sent') toast.success('Message sent on WhatsApp');
-      else toast.message('Saved to chat — WhatsApp delivery pending (check Twilio setup)');
+      else if (data?.send_status === 'no_connection') toast.message('Saved to chat — connect your WhatsApp (Meta) number to deliver');
+      else toast.message('Saved to chat — WhatsApp delivery pending');
       load(true);
     } catch (e) {
       toast.error(e?.response?.data?.detail || 'Send failed');
@@ -200,7 +227,7 @@ export default function MessagesDrawer({ open, onClose, salonId, getAuthHeaders,
           <div className="ic"><WaIcon /></div>
           <div>
             <h3>Guest Messages</h3>
-            <p>WhatsApp conversations · replies via Twilio</p>
+            <p>WhatsApp conversations · replies via Meta</p>
           </div>
           <button className="msgdrw__x" onClick={onClose} data-testid="messages-close">
             <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
@@ -263,7 +290,8 @@ export default function MessagesDrawer({ open, onClose, salonId, getAuthHeaders,
                     <div key={i} className="bub ref">{m.t}</div>
                   ) : (
                     <div key={i} className={`bub ${m.f}`}>
-                      {m.t}
+                      {m.media_type ? <MediaChip m={m} /> : null}
+                      {m.media_type ? (m.caption ? <div>{m.caption}</div> : null) : m.t}
                       <div className="meta">
                         {m.channel === 'whatsapp' ? <WaTag /> : null}
                         <span className="t">{m.tm}</span>

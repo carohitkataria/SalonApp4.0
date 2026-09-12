@@ -291,6 +291,36 @@ EXTRA_LIBRARY = [
         },
     },
     {
+        "name": "booking_completed",
+        "friendly_name": "Visit completed",
+        "category": "utility",
+        "description": "Sent when a visit is completed (thank-you + summary).",
+        "meta_payload": {
+            "name": "booking_completed", "category": "UTILITY", "language": "en_US",
+            "components": [
+                _body("✅ All done! Thank you for visiting {{1}}, {{2}}.\n"
+                      "🎫 Token: #{{3}}\n💈 Served by: {{4}}\n💰 Amount: {{5}}\n"
+                      "We hope to see you again soon!",
+                      ["Glam Studio", "Aarav", "M2", "Imran", "₹899"]),
+            ],
+        },
+    },
+    {
+        "name": "token_approaching",
+        "friendly_name": "Your turn is approaching",
+        "category": "utility",
+        "description": "Queue alert when the customer is 1–2 tokens away.",
+        "meta_payload": {
+            "name": "token_approaching", "category": "UTILITY", "language": "en_US",
+            "components": [
+                _body("⏳ Almost your turn, {{1}}! You're {{2}} away at {{3}}.\n"
+                      "🎫 Your token: #{{4}}\n💈 With: {{5}}\n⏱ Now serving: #{{6}}\n"
+                      "Please start heading over so you don't miss your turn.",
+                      ["Aarav", "2 tokens", "Glam Studio", "M4", "Imran", "M2"]),
+            ],
+        },
+    },
+    {
         "name": "payment_receipt",
         "friendly_name": "Payment receipt",
         "category": "utility",
@@ -457,9 +487,15 @@ async def seed_platform_template_library(db) -> int:
     now = datetime.now(timezone.utc).isoformat()
     upserts = 0
     for t in LIBRARY:
+        # Part 1 — only the UTILITY (transactional) templates the app actually
+        # sends are auto-provisioned onto a salon's WABA the moment keys are
+        # saved. MARKETING templates stay opt-in (auto_provision=False).
+        auto = t.get("auto_provision")
+        if auto is None:
+            auto = (str(t.get("category", "")).lower() == "utility")
         res = await db.platform_template_library.update_one(
             {"name": t["name"]},
-            {"$set": {**t, "auto_provision": True,
+            {"$set": {**t, "auto_provision": bool(auto),
                       "enabled_for_salons": t.get("enabled_for_salons", True),
                       "group": t.get("group") or _group_for(t),
                       "updated_at": now},
