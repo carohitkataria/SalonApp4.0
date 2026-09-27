@@ -12,6 +12,7 @@
  */
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import axios from 'axios';
+import { serviceCategoryOf } from '@/lib/serviceCategory';
 import { toast } from 'sonner';
 import { useQuery } from '@tanstack/react-query';
 import { useClassification, useOpsSettings, useInvalidateSalonData, qk } from '@/lib/salonQueries';
@@ -37,7 +38,7 @@ function injectCss() {
   if (_cssDone || typeof document === 'undefined') return;
   _cssDone = true;
   const css = `
-.svc2{--p:#6C4FE0;--p6:#5B3FD1;--p05:#F1EEFF;--p1:#E7E2FF;--p2:#D6CBFF;--bg:#F6F6FB;--sf:#fff;--sf2:#FBFBFE;--ink:#23252F;--inks:#3C3F4E;--mut:#7C8092;--mut2:#9A9EAE;--line:#E3E3EC;--lines:#CBD0DE;--ok:#2FA96A;--bad:#E45C86;--badbg:#FCEAF1;--gold:#C9992B;--goldbg:#FBF3DF;font-family:'Inter',system-ui,sans-serif;color:var(--ink);font-size:13px;display:flex;flex-direction:column;height:100%;min-height:0;box-sizing:border-box;padding:14px 4px 30px}
+.svc2{--p:#6C4FE0;--p6:#5B3FD1;--p05:#F1EEFF;--p1:#E7E2FF;--p2:#D6CBFF;--bg:#F6F6FB;--sf:#fff;--sf2:#FBFBFE;--ink:#23252F;--inks:#3C3F4E;--mut:#7C8092;--mut2:#9A9EAE;--line:#E3E3EC;--lines:#CBD0DE;--ok:#2FA96A;--bad:#E45C86;--badbg:#FCEAF1;--gold:#C9992B;--goldbg:#FBF3DF;font-family:'Inter',system-ui,sans-serif;color:var(--ink);font-size:13px;display:flex;flex-direction:column;height:calc(100vh - 69px);height:calc(100dvh - 69px);min-height:420px;box-sizing:border-box;padding:22px 20px 20px}
 .svc2 *{box-sizing:border-box}
 .svc2 button{font-family:inherit;cursor:pointer}
 .svc2 .num{font-variant-numeric:tabular-nums}
@@ -46,7 +47,7 @@ function injectCss() {
 .svc2 .phead .hic{width:34px;height:34px;border-radius:10px;background:var(--p05);color:var(--p);display:grid;place-items:center;flex:none}
 .svc2 .phead .hic svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:2}
 .svc2 .phead .psub{font-size:12.5px;color:var(--mut);font-weight:600;margin-top:2px}
-.svc2 .main{display:grid;grid-template-columns:290px 1fr;min-height:0;flex:1;border:1.5px solid var(--line);border-radius:14px;overflow:hidden;background:var(--sf)}
+.svc2 .svc2-main{display:grid;grid-template-columns:clamp(340px,30%,440px) minmax(0,1fr);min-height:0;flex:1;border:1.5px solid var(--line);border-radius:14px;overflow:hidden;background:var(--sf)}
 .svc2 .listcol{border-right:1.5px solid var(--line);background:var(--sf);display:flex;flex-direction:column;min-height:0}
 .svc2 .typetabs{display:flex;gap:4px;padding:8px 8px 0}
 .svc2 .typetabs button{flex:1;padding:7px;border:1.5px solid var(--line);background:var(--sf2);border-radius:8px 8px 0 0;font-weight:800;font-size:11.5px;color:var(--mut);border-bottom:0}
@@ -57,7 +58,14 @@ function injectCss() {
 .svc2 .tbtn svg{width:15px;height:15px}
 .svc2 .tbtn:hover{border-color:var(--p2);color:var(--p);background:var(--p05)}
 .svc2 .tbtn.pri{background:var(--p);border-color:var(--p);color:#fff}
-.svc2 .listscroll{overflow:auto;flex:1;min-height:0;padding:6px}
+.svc2 .listscroll{overflow:auto;flex:1;min-height:0;padding:6px;overscroll-behavior:contain}
+.svc2 .editcol{overscroll-behavior:contain}
+@media(max-width:820px){
+  .svc2{height:auto;min-height:0;padding:14px 12px 90px}
+  .svc2 .svc2-main{grid-template-columns:1fr;overflow:visible}
+  .svc2 .listcol{max-height:55vh;border-right:0;border-bottom:1.5px solid var(--line)}
+  .svc2 .editcol{overflow:visible}
+}
 .svc2 .selbar{display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:4px;background:var(--p05);border:1.5px solid var(--p2);border-radius:8px;font-size:11.5px;font-weight:700;color:var(--p6)}
 .svc2 .selbar .del{margin-left:auto;color:var(--bad);background:transparent;border:0;font-weight:800;display:inline-flex;align-items:center;gap:4px}
 .svc2 .selbar .del svg{width:13px;height:13px}
@@ -306,7 +314,7 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
   // (Haircut, Hair Spa, Facial…). Group BOTH services & packages by the L2
   // category so the Service page matches the appointment/customer/report views.
   const groupKey = useCallback(
-    (s) => (s.sub_category || 'General'),
+    (s) => serviceCategoryOf(s),
     [],
   );
 
@@ -325,6 +333,20 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
     Object.values(g).forEach((rows) => rows.sort((a, b) => ((b.is_favorite ? 1 : 0) - (a.is_favorite ? 1 : 0)) || (a.service_name || '').localeCompare(b.service_name || '')));
     return g;
   }, [filtered, groupKey]);
+
+  // Category choices for the editors: the saved classification list first, then
+  // every category already used by a service / package (most salons only ever
+  // set categories on the services themselves, so the saved list is often empty).
+  const svcCats = useMemo(() => {
+    const names = (cls.categories || []).map((c) => c.name).filter(Boolean);
+    const used = services.filter((x) => !isPkg(x)).map((x) => x.sub_category).filter(Boolean);
+    return [...new Set([...names, ...[...new Set(used)].sort((a, b) => a.localeCompare(b))])];
+  }, [cls.categories, services]);
+  const pkgCats = useMemo(() => {
+    const names = (cls.package_categories || []).filter(Boolean);
+    const used = services.filter(isPkg).map((x) => x.sub_category).filter(Boolean);
+    return [...new Set([...names, ...[...new Set(used)].sort((a, b) => a.localeCompare(b))])];
+  }, [cls.package_categories, services]);
 
   const catThumb = useCallback((name) => {
     const c = (cls.categories || []).find((x) => x.name === name);
@@ -394,7 +416,9 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
           <div className="psub">Manage your service menu, packages, prices and classifications.</div>
         </div>
       </div>
-      <div className="main">
+      {/* Not "main": that class is the Home v2 shell's scroller (rail/ribbon
+          margins + 100vh) and would leak those styles onto this grid. */}
+      <div className="svc2-main">
         {/* -------- LIST -------- */}
         <div className="listcol">
           <div className="typetabs">
@@ -462,33 +486,46 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
           {!selService
             ? <div className="editempty">Select an item, or press + to add one.</div>
             : (selService.category === 'Packages'
-              ? <PackageEditor key={selService.id || 'new-pkg'} initial={selService} services={services} salonId={salonId} H={H} cls={cls} onDone={(deleted) => { setSel(null); load(); }} />
-              : <ServiceEditor key={selService.id || 'new-svc'} initial={selService} salonId={salonId} H={H} cls={cls} onDone={() => { setSel(null); load(); }} />)}
+              ? <PackageEditor key={selService.id || 'new-pkg'} initial={selService} services={services} salonId={salonId} H={H} cls={cls} allCats={pkgCats} onDone={(deleted) => { setSel(null); load(); }} />
+              : <ServiceEditor key={selService.id || 'new-svc'} initial={selService} salonId={salonId} H={H} cls={cls} allCats={svcCats} onDone={() => { setSel(null); load(); }} />)}
         </div>
       </div>
 
-      <ClassificationDrawer open={classOpen} onClose={() => setClassOpen(false)} salonId={salonId} H={H} cls={cls} setCls={setCls} />
+      <ClassificationDrawer open={classOpen} onClose={() => setClassOpen(false)} salonId={salonId} H={H} cls={cls} setCls={setCls} reload={load} />
       <UploadDrawer open={uploadOpen} onClose={() => setUploadOpen(false)} salonId={salonId} H={H} reload={load} />
       <OnlinePriceDrawer open={onlineOpen} onClose={() => setOnlineOpen(false)} salonId={salonId} H={H} ops={ops} setOps={setOps} />
     </div>
   );
 }
 
+/* Category <select> helper: the "+ New category…" entry asks for a name; the
+   category comes into existence once a service/package is saved under it. */
+const NEW_CATEGORY = '__new_category__';
+const pickCategory = (value) => {
+  if (value !== NEW_CATEGORY) return value;
+  const name = (window.prompt('New category name') || '').trim().slice(0, 60);
+  return name || null;
+};
+
 /* ============================ SERVICE EDITOR ============================ */
-function ServiceEditor({ initial, salonId, H, cls, onDone }) {
-  const [s, setS] = useState(initial);
-  useEffect(() => { setS(initial); }, [initial]);
+// Legacy services keep their category in `category`; start the editor from the
+// resolved category so the dropdown shows (and saving keeps) the right one.
+const withCategory = (x) => (x && !x.sub_category ? { ...x, sub_category: serviceCategoryOf(x) } : x);
+
+function ServiceEditor({ initial, salonId, H, cls, allCats, onDone }) {
+  const [s, setS] = useState(() => withCategory(initial));
+  useEffect(() => { setS(withCategory(initial)); }, [initial]);
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setS((p) => ({ ...p, [k]: v }));
   const axes = s.axes || [];
   const useTier = axes.includes('tier');
   const useLen = axes.includes('length');
   const catOptions = useMemo(() => {
-    const names = (cls.categories || []).map((c) => c.name);
+    const names = [...(allCats || (cls.categories || []).map((c) => c.name))];
     if (s.sub_category && !names.includes(s.sub_category)) names.push(s.sub_category);
     if (!names.length) names.push('General');
     return names;
-  }, [cls.categories, s.sub_category]);
+  }, [allCats, cls.categories, s.sub_category]);
 
   const toggleAxis = (axis) => {
     setS((p) => {
@@ -576,8 +613,9 @@ function ServiceEditor({ initial, salonId, H, cls, onDone }) {
         <div className="cl">{I.list}Basics</div>
         <div className="grid2">
           <div className="f"><label>Category</label>
-            <select value={s.sub_category || ''} onChange={(e) => set('sub_category', e.target.value)} data-testid="svc-ed-cat">
+            <select value={s.sub_category || ''} onChange={(e) => { const v = pickCategory(e.target.value); if (v) set('sub_category', v); }} data-testid="svc-ed-cat">
               {catOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              <option value={NEW_CATEGORY}>+ New category…</option>
             </select>
           </div>
           <div className="f"><label>Duration (min)</label><input className="num" type="number" value={s.default_duration || ''} onChange={(e) => set('default_duration', e.target.value)} /></div>
@@ -666,7 +704,7 @@ function ServiceEditor({ initial, salonId, H, cls, onDone }) {
 }
 
 /* ============================ PACKAGE EDITOR ============================ */
-function PackageEditor({ initial, services, salonId, H, cls, onDone }) {
+function PackageEditor({ initial, services, salonId, H, cls, allCats, onDone }) {
   const [p, setP] = useState(initial);
   useEffect(() => { setP(initial); }, [initial]);
   const [saving, setSaving] = useState(false);
@@ -675,11 +713,11 @@ function PackageEditor({ initial, services, salonId, H, cls, onDone }) {
   const items = p.package_items || [];
   const itemsSum = items.reduce((a, i) => a + (Number(i.price) || 0), 0);
   const catOptions = useMemo(() => {
-    const names = [...(cls.package_categories || [])];
+    const names = [...(allCats || cls.package_categories || [])];
     if (p.sub_category && !names.includes(p.sub_category)) names.push(p.sub_category);
     if (!names.length) names.push('General');
     return names;
-  }, [cls.package_categories, p.sub_category]);
+  }, [allCats, cls.package_categories, p.sub_category]);
 
   const setItem = (i, k, v) => setP((x) => { const arr = [...(x.package_items || [])]; arr[i] = { ...arr[i], [k]: v }; return { ...x, package_items: arr }; });
   const addItem = () => setP((x) => ({ ...x, package_items: [...(x.package_items || []), { service_id: avail[0]?.id || '', day_offset: 0, price: avail[0]?.base_price || 0 }] }));
@@ -746,8 +784,9 @@ function PackageEditor({ initial, services, salonId, H, cls, onDone }) {
         <div className="cl">{I.list}Basics</div>
         <div className="grid2">
           <div className="f"><label>Category</label>
-            <select value={p.sub_category} onChange={(e) => set('sub_category', e.target.value)}>
+            <select value={p.sub_category} onChange={(e) => { const v = pickCategory(e.target.value); if (v) set('sub_category', v); }}>
               {catOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              <option value={NEW_CATEGORY}>+ New category…</option>
             </select>
           </div>
           <div className="f"><label>Gender</label>
@@ -812,23 +851,25 @@ function ThumbCard({ value, onUrl, onFile }) {
 }
 
 /* ============================ DRAWERS ============================ */
-function ClassificationDrawer({ open, onClose, salonId, H, cls, setCls }) {
+// Categories keep their original name (`_orig`) so a rename can move the
+// services that use it; new rows have none.
+const withOrig = (c) => ({ ...c, categories: (c.categories || []).map((x) => ({ ...x, _orig: x.name })) });
+
+function ClassificationDrawer({ open, onClose, salonId, H, cls, setCls, reload }) {
   const [tab, setTab] = useState('category');
-  const [local, setLocal] = useState(cls);
-  useEffect(() => { if (open) setLocal(cls); }, [open, cls]);
+  const [local, setLocal] = useState(() => withOrig(cls));
+  useEffect(() => { if (open) setLocal(withOrig(cls)); }, [open, cls]);
   const [saving, setSaving] = useState(false);
 
   const listFor = () => tab === 'category' ? (local.categories || []).map((c) => c.name) : tab === 'tier' ? (local.tiers || []) : (local.lengths || []);
-  const setListFor = (arr, catThumbs) => {
-    setLocal((l) => {
-      if (tab === 'category') return { ...l, categories: arr.map((name, i) => ({ name, thumbnail_url: (catThumbs || (l.categories || []).map((c) => c.thumbnail_url))[i] || '' })) };
-      if (tab === 'tier') return { ...l, tiers: arr };
-      return { ...l, lengths: arr };
-    });
-  };
-  const rename = (i, v) => { const a = listFor(); a[i] = v; setListFor([...a]); };
-  const add = () => { const a = listFor(); a.push(tab === 'category' ? 'New category' : 'New'); setListFor([...a]); };
-  const rm = (i) => { const a = listFor(); a.splice(i, 1); setListFor([...a]); };
+  const editList = (fn) => setLocal((l) => {
+    if (tab === 'category') { const cats = [...(l.categories || [])]; fn(cats, true); return { ...l, categories: cats }; }
+    const key = tab === 'tier' ? 'tiers' : 'lengths';
+    const arr = [...(l[key] || [])]; fn(arr, false); return { ...l, [key]: arr };
+  });
+  const rename = (i, v) => editList((a, isCat) => { a[i] = isCat ? { ...a[i], name: v } : v; });
+  const add = () => editList((a, isCat) => { a.push(isCat ? { name: 'New category', thumbnail_url: '' } : 'New'); });
+  const rm = (i) => editList((a) => { a.splice(i, 1); });
   const setCatThumb = async (i, e) => {
     const f = e.target.files?.[0]; if (!f) return;
     const url = await fileToDataUrl(f);
@@ -838,13 +879,20 @@ function ClassificationDrawer({ open, onClose, salonId, H, cls, setCls }) {
   const save = async () => {
     setSaving(true);
     try {
+      const cats = local.categories || [];
+      const renames = {};
+      cats.forEach((c) => { if (c._orig && c.name.trim() && c._orig !== c.name.trim()) renames[c._orig] = c.name.trim(); });
       const res = await axios.put(`${API}/salons/${salonId}/classification`, {
-        tiers: local.tiers, lengths: local.lengths, categories: local.categories, package_categories: local.package_categories,
+        tiers: local.tiers, lengths: local.lengths,
+        categories: cats.map(({ _orig, ...c }) => c),
+        renames,
+        package_categories: local.package_categories,
       }, H());
       setCls((c) => ({ ...c, ...res.data }));
       toast.success('Classification saved');
+      if (Object.keys(renames).length) reload?.();
       onClose();
-    } catch { toast.error('Save failed'); }
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Save failed'); }
     finally { setSaving(false); }
   };
 
@@ -882,7 +930,8 @@ function ClassificationDrawer({ open, onClose, salonId, H, cls, setCls }) {
 }
 
 function UploadDrawer({ open, onClose, salonId, H, reload }) {
-  const href = `${API}/services/upload-template.csv`;
+  // Salon-specific template: its price:* columns use this salon's tier / hair-length names.
+  const href = `${API}/salons/${salonId}/services/csv-template`;
   const fileRef = useRef(null);
   const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -897,6 +946,14 @@ function UploadDrawer({ open, onClose, salonId, H, reload }) {
         headers: { ...(H()?.headers || {}), 'Content-Type': 'multipart/form-data' },
       });
       toast.success(res.data?.message || 'Upload complete');
+      const errs = res.data?.errors || [];
+      if (errs.length) {
+        const shown = errs.slice(0, 3).map((er) => `Row ${er.row}: ${er.reason}`).join(' · ');
+        toast.warning(`${errs.length} row(s) skipped`, {
+          description: errs.length > 3 ? `${shown} · …and ${errs.length - 3} more` : shown,
+          duration: 12000,
+        });
+      }
       reload?.();
       onClose?.();
     } catch (e) {
@@ -941,6 +998,7 @@ function UploadDrawer({ open, onClose, salonId, H, reload }) {
             <li>The export &amp; template share the same columns, keyed by <span className="codepill">service_key</span>.</li>
             <li>Blank <span className="codepill">service_key</span> → <b>creates</b> a new service (key auto-generated).</li>
             <li>Existing <span className="codepill">service_key</span> → <b>updates</b> that service in place.</li>
+            <li>Tier / hair-length prices: set <span className="codepill">pricing</span> to <b>tier</b>, <b>length</b> or <b>tier+length</b> and fill the matching <span className="codepill">price:Premium</span>, <span className="codepill">price:Long</span> or <span className="codepill">price:Premium/Long</span> columns. Leave <span className="codepill">pricing</span> blank on an existing service to keep its current prices; <b>flat</b> removes them.</li>
           </ol>
         </div>
       </div>

@@ -21,6 +21,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import axios from 'axios';
+import { serviceCategoryOf } from '@/lib/serviceCategory';
 import CustomerDrawer from './CustomerDrawer';
 import GuestProfileModal from './GuestProfileModal';
 
@@ -151,6 +152,9 @@ export default function AppointmentDrawer({
   const [membershipDiscPct, setMembershipDiscPct] = useState(0); // auto from membership; editable
   const [tip, setTip] = useState(0);
   const [finalOverride, setFinalOverride] = useState(null);
+  // Invoice settings (GST registration / rate / inclusive / round-off) so the
+  // bill here matches the invoice the backend generates.
+  const [invSettings, setInvSettings] = useState(null);
 
   /* payment — single-select by default (default UPI); "Split payment" toggle
      enables selecting multiple modes to split the bill. */
@@ -244,6 +248,7 @@ export default function AppointmentDrawer({
           }
         }).catch(() => {});
         axios.get(`${API}/salons/${sid}/classification`).then((r) => r.data && setClassification((c) => ({ ...c, ...r.data }))).catch(() => {});
+        axios.get(`${API}/salons/${sid}/invoice-settings`).then((r) => setInvSettings(r.data || null)).catch(() => {});
         setServices(Array.isArray(svcRes.data) ? svcRes.data : (svcRes.data?.services || []));
         setBarbers((Array.isArray(brbRes.data) ? brbRes.data : (brbRes.data?.barbers || [])).filter((b) => b.is_active !== false));
         setCustomers(Array.isArray(custRes.data) ? custRes.data : (custRes.data?.customers || []));
@@ -312,7 +317,7 @@ export default function AppointmentDrawer({
     return (c === 'packages' || c === 'package') ? 'pkg' : 'svc';
   };
   // Fine-grained bucket for the 2nd filter row (post taxonomy migration).
-  const subCatOf = (s) => s.sub_category || s.category || 'General';
+  const subCatOf = (s) => serviceCategoryOf(s);
 
   const genderMatch = (s) => {
     const t = s.gender_tag || 'Unisex';
@@ -326,9 +331,15 @@ export default function AppointmentDrawer({
     services.forEach((s) => {
       if (svcTypeOf(s) === offerType && genderMatch(s)) set.add(subCatOf(s));
     });
-    return ['all', ...Array.from(set)];
+    // Same order as Services → Manage classification (the master category list).
+    const master = (offerType === 'pkg'
+      ? (classification.package_categories || [])
+      : (classification.categories || []).map((c) => c.name)).map((n) => String(n).toLowerCase());
+    const rank = (n) => { const i = master.indexOf(String(n).toLowerCase()); return i === -1 ? Infinity : i; };
+    const ordered = Array.from(set).sort((a, b) => (rank(a) - rank(b)) || String(a).localeCompare(String(b)));
+    return ['all', ...ordered];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [services, offerType, gender]);
+  }, [services, offerType, gender, classification]);
 
   /* Variant (tier × length) price resolver — mirrors the service editor. */
   const variantKey = (axes, tIdx, lIdx) => {
@@ -341,14 +352,19 @@ export default function AppointmentDrawer({
     if (l) return `${lName}`;
     return 'flat';
   };
+  /* A tier / length variant with no price (blank or 0 in the price matrix) is
+     not offered: it resolves to 0 and can't be picked. It never falls back to
+     the service's base price (that is just the lowest variant price). */
   const priceOfVariant = (s, tIdx = activeTier, lIdx = activeLen) => {
     const axes = s.axes || [];
-    if (axes.length && s.price_matrix) {
-      const v = s.price_matrix[variantKey(axes, tIdx, lIdx)];
-      if (v != null && v !== '') return Number(v);
+    if (axes.length) {
+      const v = Number((s.price_matrix || {})[variantKey(axes, tIdx, lIdx)]);
+      return Number.isFinite(v) && v > 0 ? v : 0;
     }
     return Number(s.base_price || s.price || 0);
   };
+  const variantOffered = (s, tIdx = activeTier, lIdx = activeLen) =>
+    !(s.axes || []).length || priceOfVariant(s, tIdx, lIdx) > 0;
   const variantLabel = (s) => {
     const axes = s.axes || [];
     const parts = [];
@@ -394,7 +410,23 @@ export default function AppointmentDrawer({
   const membershipDiscAmt = Math.round((subtotal * (Number(membershipDiscPct) || 0)) / 100);
   const totalDiscount = discountAmtPct + membershipDiscAmt + Number(discountAbs || 0) + Number(couponDiscount || 0);
   const membershipPrice = Number(membershipPlan?.price || membershipPlan?.amount || 0);
-  const computedTotal = Math.max(0, subtotal - totalDiscount + Number(tip || 0) + membershipPrice);
+  /* GST — same maths as the invoice (generate_and_send_invoice): tax on the
+     discounted bill (+ membership sold), CGST/SGST split equally, no tax on the
+     tip, then round-off per the invoice settings. */
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const gstOn = !!invSettings?.is_gst_registered && Number(invSettings?.gst_rate) > 0;
+  const gstRate = gstOn ? Number(invSettings.gst_rate) : 0;
+  const gstInclusive = gstOn && !!invSettings?.prices_include_tax;
+  const taxBase = Math.max(0, subtotal - totalDiscount) + membershipPrice;
+  const gstAmt = !gstOn ? 0 : gstInclusive
+    ? r2(taxBase - r2(taxBase / (1 + gstRate / 100)))
+    : r2(taxBase * gstRate / 100);
+  const cgstAmt = r2(gstAmt / 2);
+  const sgstAmt = r2(gstAmt - cgstAmt);
+  const preRound = taxBase + (gstInclusive ? 0 : gstAmt) + Number(tip || 0);
+  const roundOffOn = invSettings ? invSettings.round_off_invoice !== false : false;
+  const computedTotal = roundOffOn ? Math.round(preRound) : r2(preRound);
+  const roundOffAmt = r2(computedTotal - preRound);
   const payable = finalOverride != null ? Number(finalOverride) : computedTotal;
   const totalDurationMin = svcRows.reduce((t, s) => t + Number(s.default_duration || 30), 0);
 
@@ -459,6 +491,7 @@ export default function AppointmentDrawer({
       }
       // Snapshot the active tier/length variant + price at add time.
       const svc = services.find((x) => x.id === id);
+      if (svc && !variantOffered(svc)) return prev;  // this tier / length has no price
       if (svc) {
         const axes = svc.axes || [];
         setSvcVariant((v) => ({
@@ -838,7 +871,6 @@ export default function AppointmentDrawer({
           .newapt .apt-fav-chip .apt-fav-star{font-size:18px;line-height:1;color:#C9992B}
           .newapt .apt-fav-chip.on{background:#C9992B !important;border-color:#C9992B !important}
           .newapt .apt-fav-chip.on .apt-fav-star{color:#fff}
-          .newapt .apt-catbody.has-rail{display:grid;grid-template-columns:auto 1fr;gap:9px;align-items:start}
           .newapt .apt-catbody .catalog{min-width:0}
           .newapt .apt-vrail{display:flex;flex-direction:column;gap:5px;padding:6px 5px;border:1.5px solid #ECECF3;border-radius:11px;background:#FBFBFE;align-self:start;position:sticky;top:0}
           .newapt .apt-vrail .vr-grp{display:flex;flex-direction:column;gap:4px}
@@ -929,7 +961,7 @@ export default function AppointmentDrawer({
             {/* Guest search relocated to the right "Guest details" card (redesign 2026). */}
 
             {/* Services & membership — title + search in one row (Feb 2026) */}
-            <div className="block">
+            <div className="block apt-svcblock">
               <div className="fs-title" style={{ margin: '2px 0 10px' }}>
                 <span className="dot" style={{ ['--sc']: '#6C4FE0' }} />
                 <span>Services &amp; membership <span className="req">*</span></span>
@@ -1013,7 +1045,7 @@ export default function AppointmentDrawer({
                         <div className="cat-lbl">Services</div>
                         <div className="svc-sub">
                           {filteredCatalog.services.map((s) => (
-                            <ServiceCard key={s.id} s={s} on={selectedSvc.includes(s.id)} onClick={() => toggleSvc(s.id)} price={priceOfVariant(s)} variant={variantLabel(s)} />
+                            <ServiceCard key={s.id} s={s} on={selectedSvc.includes(s.id)} onClick={() => toggleSvc(s.id)} price={priceOfVariant(s)} variant={variantLabel(s)} unavailable={!variantOffered(s)} />
                           ))}
                         </div>
                       </>
@@ -1057,7 +1089,7 @@ export default function AppointmentDrawer({
                   filteredCatalog.services.length ? (
                     <div className="svc-sub">
                       {filteredCatalog.services.map((s) => (
-                        <ServiceCard key={s.id} s={s} on={selectedSvc.includes(s.id)} onClick={() => toggleSvc(s.id)} price={priceOfVariant(s)} variant={variantLabel(s)} />
+                        <ServiceCard key={s.id} s={s} on={selectedSvc.includes(s.id)} onClick={() => toggleSvc(s.id)} price={priceOfVariant(s)} variant={variantLabel(s)} unavailable={!variantOffered(s)} />
                       ))}
                     </div>
                   ) : <div className="cat-empty">No services here.</div>
@@ -1435,11 +1467,23 @@ export default function AppointmentDrawer({
                 {membershipPrice > 0 && (
                   <div className="os-t"><div className="n">Membership</div><div className="p">+ {money(membershipPrice)}</div></div>
                 )}
+                {gstOn && !gstInclusive && gstAmt > 0 && (
+                  <>
+                    <div className="os-t" data-testid="apt-cgst"><div className="n">CGST ({gstRate / 2}%)</div><div className="p">+ {money(cgstAmt)}</div></div>
+                    <div className="os-t" data-testid="apt-sgst"><div className="n">SGST ({gstRate / 2}%)</div><div className="p">+ {money(sgstAmt)}</div></div>
+                  </>
+                )}
+                {gstInclusive && gstAmt > 0 && (
+                  <div className="os-t" data-testid="apt-gst-incl"><div className="n" style={{ color: '#7C8092' }}>Includes GST ({gstRate}%)</div><div className="p" style={{ color: '#7C8092' }}>{money(gstAmt)}</div></div>
+                )}
+                {Math.abs(roundOffAmt) >= 0.01 && (
+                  <div className="os-t"><div className="n">Round off</div><div className="p">{roundOffAmt > 0 ? '+' : '−'} {money(Math.abs(roundOffAmt))}</div></div>
+                )}
               </div>
 
               {/* Editable final amount */}
               <div className="os-tot">
-                <div className="lb">Final amount</div>
+                <div className="lb">Final amount{gstOn ? ' (incl. GST)' : ''}</div>
                 <div className="final-edit">
                   <span className="cur">₹</span>
                   <input type="number" min="0" value={payable}
@@ -1525,13 +1569,18 @@ export default function AppointmentDrawer({
 }
 
 /* --------- small presentational components --------- */
-function ServiceCard({ s, on, onClick, price, variant }) {
-  const col = catOf(s.sub_category || s.category || 'General');
+function ServiceCard({ s, on, onClick, price, variant, unavailable }) {
+  const col = catOf(serviceCategoryOf(s));
   const thumb = s.thumbnail_url || s.image_url;
   const shown = price != null ? price : (s.base_price || s.price);
   const onwards = s.price_type === 'onwards';
+  // Not offered in the chosen tier / length: greyed out at ₹0 and not pickable.
+  // An already-picked card stays clickable so it can still be removed.
+  const blocked = unavailable && !on;
   return (
-    <button className={`svc-card ${on ? 'on' : ''}`} onClick={onClick}
+    <button className={`svc-card ${on ? 'on' : ''} ${unavailable ? 'na' : ''}`} onClick={onClick}
+            disabled={blocked} aria-disabled={blocked}
+            title={unavailable ? `Not offered${variant ? ` for ${variant}` : ''} — no price set` : undefined}
             style={{ ['--cc']: col.cc, ['--ccbg']: col.bg }}>
       <span className="svc-check">
         <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
@@ -1544,7 +1593,9 @@ function ServiceCard({ s, on, onClick, price, variant }) {
         <span className="pr" style={{ color: col.cc }}>
           {money(shown)}{onwards ? '+' : ''} <span className="dur">· {s.default_duration || 30}m</span>
         </span>
-        {variant ? <span className="svc-tag">{variant}</span> : ((s.sub_category || s.category) && <span className="svc-tag">{s.sub_category || s.category}</span>)}
+        {unavailable
+          ? <span className="svc-tag">Not offered{variant ? ` · ${variant}` : ''}</span>
+          : variant ? <span className="svc-tag">{variant}</span> : <span className="svc-tag">{serviceCategoryOf(s)}</span>}
       </span>
     </button>
   );

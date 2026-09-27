@@ -6165,8 +6165,15 @@ async def get_salon_menu(salon_id: str, branch: Optional[str] = None):
         if svc["id"] in override_map:
             svc["base_price"] = override_map[svc["id"]]
 
-    # Group by category, sorted
-    services.sort(key=lambda s: (s.get("category") or "General", s.get("service_name") or ""))
+    # Group by category in the salon's master order (Services → Manage
+    # classification); categories not in that list go last, alphabetically.
+    cls_doc = await db.salon_classification.find_one({"salon_id": salon_id}, {"_id": 0})
+    if cls_doc is not None:
+        cls_doc = await _sync_salon_categories(salon_id, cls_doc)
+    category_order = [c.get("name") for c in ((cls_doc or {}).get("categories") or []) if c.get("name")]
+    rank = {n.lower(): i for i, n in enumerate(category_order)}
+    services.sort(key=lambda s: (rank.get(_svc_bucket(s).lower(), len(rank)), _svc_bucket(s).lower(),
+                                 s.get("service_name") or ""))
 
     return {
         "salon": {
@@ -6191,6 +6198,7 @@ async def get_salon_menu(salon_id: str, branch: Optional[str] = None):
             else None
         ),
         "services": services,
+        "category_order": category_order,
     }
 
 @api_router.get("/salons/{salon_id}/services/all")
@@ -6327,6 +6335,12 @@ async def resolve_service_category(salon_id: str, category_id: Optional[str], ca
 @api_router.get("/salons/{salon_id}/categories")
 async def list_categories(salon_id: str, type: str = "service", include_inactive: bool = False):
     """Single source of truth read by all three surfaces (customer, staff, salon)."""
+    if type == "service":
+        cls_doc = await db.salon_classification.find_one({"salon_id": salon_id}, {"_id": 0})
+        if cls_doc is not None:
+            await _sync_salon_categories(salon_id, cls_doc)
+            await _mirror_categories_collection(salon_id, (await db.salon_classification.find_one(
+                {"salon_id": salon_id}, {"_id": 0}) or {}).get("categories") or [])
     q = {"salon_id": salon_id, "type": type}
     if not include_inactive:
         q["active"] = True
@@ -6411,6 +6425,101 @@ DEFAULT_OPS_SETTINGS = {
 }
 
 
+# ---- Category taxonomy sync ------------------------------------------------
+# `salon_classification.categories` (edited in Services → Manage classification)
+# is the master list of service categories. Categories are also stored on each
+# service (`sub_category`) and mirrored into the WS4 `categories` collection,
+# which the customer booking page reads for order + thumbnails. These helpers
+# keep all three in step:
+#   * any category a service uses is appended to the master list,
+#   * the master list's order / thumbnails are mirrored to `categories`.
+
+
+def _svc_bucket(svc: dict) -> str:
+    """The category a service is shown under (same rule as the UIs)."""
+    cat = (svc.get("category") or "").strip()
+    sub = (svc.get("sub_category") or "").strip()
+    if sub:
+        return sub
+    return cat if cat and cat.lower() not in ("services", "packages", "package") else "General"
+
+
+def _is_package(svc: dict) -> bool:
+    return (svc.get("category") or "").strip().lower() in ("packages", "package")
+
+
+async def _salon_visible_services(salon_id: str, projection: Optional[dict] = None) -> List[dict]:
+    """Services the salon sees: owned, or linked via salon_services (as /services/all)."""
+    links = await db.salon_services.find({"salon_id": salon_id}, {"_id": 0, "service_id": 1}).to_list(5000)
+    ids = [l["service_id"] for l in links if l.get("service_id")]
+    query = {"is_active": True, "$or": [{"salon_id": salon_id}] + ([{"id": {"$in": ids}}] if ids else [])}
+    return await db.services.find(query, projection or {"_id": 0}).to_list(5000)
+
+
+async def _used_categories(salon_id: str):
+    """(service categories, package categories) in use, in first-seen order."""
+    svcs = await _salon_visible_services(salon_id, {"_id": 0, "category": 1, "sub_category": 1})
+    svc_cats, pkg_cats = [], []
+    for x in svcs:
+        target = pkg_cats if _is_package(x) else svc_cats
+        b = _svc_bucket(x)
+        if b not in target:
+            target.append(b)
+    return svc_cats, pkg_cats
+
+
+async def _mirror_categories_collection(salon_id: str, categories: List[dict]) -> None:
+    """Mirror the master list (order + thumbnails) into the WS4 collection."""
+    existing = await db.categories.find({"salon_id": salon_id, "type": "service"}, {"_id": 0}).to_list(1000)
+    by_slug = {c.get("slug"): c for c in existing}
+    master_slugs = set()
+    for i, c in enumerate(categories):
+        slug = slugify_name(c["name"])
+        master_slugs.add(slug)
+        cur = by_slug.get(slug) or await ensure_category(salon_id, "service", c["name"])
+        want = {"name": c["name"], "sort_order": i, "active": True}
+        if c.get("thumbnail_url"):
+            want["thumbnail_url"] = c["thumbnail_url"]
+        diff = {k: v for k, v in want.items() if cur.get(k) != v}
+        if diff:
+            await db.categories.update_one({"id": cur["id"]}, {"$set": diff})
+    # Categories removed from the master list stop showing to customers.
+    for c in existing:
+        if c.get("slug") not in master_slugs and c.get("active", True):
+            await db.categories.update_one({"id": c["id"]}, {"$set": {"active": False}})
+
+
+async def _sync_salon_categories(salon_id: str, doc: dict) -> dict:
+    """Append in-use categories missing from the master lists (never removes);
+    persist + mirror only when something changed. Returns the updated doc."""
+    svc_used, pkg_used = await _used_categories(salon_id)
+    cats = [dict(c) for c in (doc.get("categories") or []) if (c.get("name") or "").strip()]
+    pkg_cats = [p for p in (doc.get("package_categories") or []) if str(p).strip()]
+    changed = False
+    have = {c["name"].strip().lower() for c in cats}
+    if svc_used:
+        # Thumbnails already set in the WS4 collection carry over to the master list.
+        ws4 = {c.get("slug"): c for c in await db.categories.find(
+            {"salon_id": salon_id, "type": "service"}, {"_id": 0}).to_list(1000)}
+        for name in svc_used:
+            if name.lower() not in have:
+                cats.append({"name": name, "thumbnail_url": (ws4.get(slugify_name(name)) or {}).get("thumbnail_url") or ""})
+                have.add(name.lower())
+                changed = True
+    have_p = {p.strip().lower() for p in pkg_cats}
+    for name in pkg_used:
+        if name.lower() not in have_p:
+            pkg_cats.append(name)
+            have_p.add(name.lower())
+            changed = True
+    if changed:
+        await db.salon_classification.update_one(
+            {"salon_id": salon_id},
+            {"$set": {"categories": cats, "package_categories": pkg_cats, "salon_id": salon_id}}, upsert=True)
+        await _mirror_categories_collection(salon_id, cats)
+    return {**doc, "categories": cats, "package_categories": pkg_cats}
+
+
 @api_router.get("/salons/{salon_id}/classification")
 async def get_salon_classification(salon_id: str):
     """Tier + hair-length + category classification sets used by the price
@@ -6421,6 +6530,7 @@ async def get_salon_classification(salon_id: str):
         doc = {"salon_id": salon_id, "tiers": DEFAULT_TIERS[:], "lengths": DEFAULT_LENGTHS[:],
                "categories": [], "package_categories": []}
         await db.salon_classification.insert_one(dict(doc))
+    doc = await _sync_salon_categories(salon_id, doc)
     return {
         "tiers": doc.get("tiers") or DEFAULT_TIERS[:],
         "lengths": doc.get("lengths") or DEFAULT_LENGTHS[:],
@@ -6436,6 +6546,12 @@ async def update_salon_classification(salon_id: str, body: dict, current_salon=D
         updates["tiers"] = [str(t).strip() for t in body["tiers"] if str(t).strip()]
     if isinstance(body.get("lengths"), list):
         updates["lengths"] = [str(l).strip() for l in body["lengths"] if str(l).strip()]
+    # Optional {old_name: new_name} maps sent by the classification drawer when
+    # a category is renamed, so the salon's services move with it.
+    renames = {str(k).strip(): str(v).strip() for k, v in (body.get("renames") or {}).items()
+               if str(k).strip() and str(v).strip() and str(k).strip() != str(v).strip()}
+    pkg_renames = {str(k).strip(): str(v).strip() for k, v in (body.get("package_renames") or {}).items()
+                   if str(k).strip() and str(v).strip() and str(k).strip() != str(v).strip()}
     if isinstance(body.get("categories"), list):
         cats = []
         for c in body["categories"]:
@@ -6446,10 +6562,44 @@ async def update_salon_classification(salon_id: str, body: dict, current_salon=D
         updates["categories"] = cats
     if isinstance(body.get("package_categories"), list):
         updates["package_categories"] = [str(p).strip() for p in body["package_categories"] if str(p).strip()]
+
+    # A category still used by services can't be removed (it would just come
+    # back on the next sync). Renames are applied first.
+    if "categories" in updates or "package_categories" in updates:
+        svc_used, pkg_used = await _used_categories(salon_id)
+        checks = []
+        if "categories" in updates:
+            keep = {c["name"].lower() for c in updates["categories"]}
+            checks.append(([u for u in svc_used if renames.get(u, u).lower() not in keep], False))
+        if "package_categories" in updates:
+            keep_p = {p.lower() for p in updates["package_categories"]}
+            checks.append(([u for u in pkg_used if pkg_renames.get(u, u).lower() not in keep_p], True))
+        for removed, is_pkg in checks:
+            if removed:
+                svcs = await _salon_visible_services(salon_id, {"_id": 0, "category": 1, "sub_category": 1})
+                n = sum(1 for x in svcs if _is_package(x) == is_pkg and _svc_bucket(x) in removed)
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{', '.join(removed)} still {'has' if len(removed) == 1 else 'have'} {n} "
+                           f"{'package' if is_pkg else 'service'}(s). Move them to another category first.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for old, new in renames.items():
+        await db.services.update_many(
+            {"salon_id": salon_id, "is_active": True, "category": {"$nin": ["Packages", "Package"]}, "sub_category": old},
+            {"$set": {"sub_category": new, "updated_at": now_iso}})
+    for old, new in pkg_renames.items():
+        await db.services.update_many(
+            {"salon_id": salon_id, "is_active": True, "category": {"$in": ["Packages", "Package"]}, "sub_category": old},
+            {"$set": {"sub_category": new, "updated_at": now_iso}})
+
     if updates:
         await db.salon_classification.update_one(
             {"salon_id": salon_id}, {"$set": {**updates, "salon_id": salon_id}}, upsert=True)
     doc = await db.salon_classification.find_one({"salon_id": salon_id}, {"_id": 0}) or {}
+    if "categories" in updates:
+        await _mirror_categories_collection(salon_id, doc.get("categories") or [])
+    doc = await _sync_salon_categories(salon_id, doc)
     return {
         "tiers": doc.get("tiers") or DEFAULT_TIERS[:],
         "lengths": doc.get("lengths") or DEFAULT_LENGTHS[:],
@@ -10229,45 +10379,195 @@ async def apply_parsed_menu_services(
     }
 
 
-# CSV column headers for the service uploader (also used for the template).
-SERVICE_CSV_HEADERS = [
-    "service_name",
-    "description",
-    "category",
-    "gender_tag",
-    "default_duration",
-    "base_price",
-    "price_type",
-    "is_favorite",
-    "available_at_home",
-    "thumbnail_url",
-    "images",
+# ---- Service CSV: columns + tier / hair-length pricing helpers ---------------
+# Base columns shared by the upload template, the export and the uploader.
+SERVICE_CSV_BASE_HEADERS = [
+    "service_key", "service_name", "description", "category", "sub_category",
+    "gender_tag", "default_duration", "base_price", "price_type",
+    "is_favorite", "available_at_home", "thumbnail_url", "images",
+    "gst_rate", "hsn_code",
 ]
+# Variant pricing columns (after the base columns):
+#   pricing               — flat | tier | length | tier+length
+#   price:<Tier>          — price per tier            (pricing = tier)
+#   price:<Length>        — price per hair length     (pricing = length)
+#   price:<Tier>/<Length> — price per tier × length   (pricing = tier+length)
+# They map onto the service's `axes` + `price_matrix`, keyed exactly like the
+# service editor: "<Tier>__<Length>", "<Tier>" or "<Length>".
+SERVICE_CSV_PRICE_PREFIX = "price:"
+
+
+async def _salon_tiers_lengths(salon_id: str):
+    doc = await db.salon_classification.find_one({"salon_id": salon_id}, {"_id": 0}) or {}
+    return (doc.get("tiers") or DEFAULT_TIERS[:]), (doc.get("lengths") or DEFAULT_LENGTHS[:])
+
+
+def _service_csv_price_headers(tiers: List[str], lengths: List[str]) -> List[str]:
+    cols = [f"{SERVICE_CSV_PRICE_PREFIX}{t}" for t in tiers]
+    cols += [f"{SERVICE_CSV_PRICE_PREFIX}{l}" for l in lengths]
+    cols += [f"{SERVICE_CSV_PRICE_PREFIX}{t}/{l}" for t in tiers for l in lengths]
+    return list(dict.fromkeys(cols))  # de-dup if a tier and a length share a name
+
+
+def _service_csv_headers(tiers: List[str], lengths: List[str]) -> List[str]:
+    return SERVICE_CSV_BASE_HEADERS + ["pricing"] + _service_csv_price_headers(tiers, lengths)
+
+
+def _service_csv_pricing_cells(svc: dict, tiers: List[str], lengths: List[str]) -> List[Any]:
+    """`pricing` + price:* cells for one service, aligned with _service_csv_headers."""
+    axes = svc.get("axes") or []
+    matrix = svc.get("price_matrix") or {}
+    use_t, use_l = "tier" in axes, "length" in axes
+    mode = "tier+length" if (use_t and use_l) else "tier" if use_t else "length" if use_l else "flat"
+    cells: Dict[str, Any] = {}
+    if use_t and use_l:
+        for t in tiers:
+            for l in lengths:
+                if f"{t}__{l}" in matrix:
+                    cells[f"{SERVICE_CSV_PRICE_PREFIX}{t}/{l}"] = matrix[f"{t}__{l}"]
+    elif use_t or use_l:
+        for name in (tiers if use_t else lengths):
+            if name in matrix:
+                cells[f"{SERVICE_CSV_PRICE_PREFIX}{name}"] = matrix[name]
+    return [mode] + [cells.get(h, "") for h in _service_csv_price_headers(tiers, lengths)]
+
+
+def _parse_service_csv_pricing(raw: dict, tiers: List[str], lengths: List[str]):
+    """Read the `pricing` + price:* cells of one uploaded row.
+
+    Returns (pricing, error). `pricing` is None when the row carries no pricing
+    info (leave the service's variant pricing as it is), else
+    {"axes": [...], "price_matrix": {...}} — axes == [] means flat pricing.
+    """
+    mode_cell = next(
+        (raw[k] for k in ("pricing", "pricing_axes", "price_by") if k in raw and raw[k] is not None), ""
+    )
+    mode_raw = str(mode_cell).strip().lower()
+    mode_words = set(re.split(r"[^a-z]+", mode_raw)) - {""}
+    if not mode_raw:
+        axes = None
+    elif mode_words & {"flat", "fixed", "single", "none"}:
+        axes = []
+    elif "both" in mode_words or ("tier" in mode_words or "tiers" in mode_words) and (
+        mode_words & {"length", "lengths"}
+    ):
+        axes = ["tier", "length"]
+    elif mode_words & {"tier", "tiers"}:
+        axes = ["tier"]
+    elif mode_words & {"length", "lengths"}:
+        axes = ["length"]
+    else:
+        return None, f"Unknown pricing '{mode_cell}' (use flat, tier, length or tier+length)"
+
+    tier_by_lc = {t.lower(): t for t in tiers}
+    len_by_lc = {l.lower(): l for l in lengths}
+    singles, combos = [], []  # (column, name[, name2], price)
+    for k, v in raw.items():
+        key = str(k or "").strip()
+        if not key.lower().startswith(SERVICE_CSV_PRICE_PREFIX) or v is None or str(v).strip() == "":
+            continue
+        try:
+            price = float(str(v).strip().replace(",", "").replace("₹", ""))
+        except ValueError:
+            return None, f"Column '{key}': '{v}' is not a number"
+        if price < 0:
+            return None, f"Column '{key}': price cannot be negative"
+        label = key[len(SERVICE_CSV_PRICE_PREFIX):].strip()
+        if "/" in label:
+            t, l = (part.strip() for part in label.split("/", 1))
+            combos.append((key, t, l, price))
+        else:
+            singles.append((key, label, price))
+
+    if axes is None:
+        if not singles and not combos:
+            return None, None
+        if combos:
+            axes = ["tier", "length"]
+        else:
+            names = [n.lower() for _, n, _ in singles]
+            in_t = all(n in tier_by_lc for n in names)
+            in_l = all(n in len_by_lc for n in names)
+            if in_t and not in_l:
+                axes = ["tier"]
+            elif in_l and not in_t:
+                axes = ["length"]
+            else:
+                return None, "Can't tell tier from length pricing — fill the 'pricing' column (tier, length or tier+length)"
+
+    tier_names = ", ".join(tiers)
+    len_names = ", ".join(lengths)
+    matrix: Dict[str, float] = {}
+    if axes == []:
+        if singles or combos:
+            return None, "pricing is 'flat' but price:* columns are filled — clear them or change pricing"
+    elif axes == ["tier", "length"]:
+        if singles:
+            return None, f"Column '{singles[0][0]}' is for single-axis pricing; use price:<Tier>/<Length> columns for tier+length"
+        for key, t, l, price in combos:
+            if t.lower() not in tier_by_lc:
+                return None, f"Column '{key}': unknown tier '{t}' (salon tiers: {tier_names})"
+            if l.lower() not in len_by_lc:
+                return None, f"Column '{key}': unknown hair length '{l}' (salon lengths: {len_names})"
+            matrix[f"{tier_by_lc[t.lower()]}__{len_by_lc[l.lower()]}"] = price
+    else:
+        by_lc, kind, names = (
+            (tier_by_lc, "tier", tier_names) if axes == ["tier"] else (len_by_lc, "hair length", len_names)
+        )
+        if combos:
+            return None, f"Column '{combos[0][0]}' is for tier+length pricing; this row uses '{axes[0]}' pricing"
+        for key, n, price in singles:
+            if n.lower() not in by_lc:
+                return None, f"Column '{key}': unknown {kind} '{n}' (salon {kind}s: {names})"
+            matrix[by_lc[n.lower()]] = price
+    if axes and not matrix:
+        return None, f"pricing is '{'+'.join(axes)}' but no matching price:* cells are filled"
+    return {"axes": axes, "price_matrix": matrix}, None
+
+
+def _service_csv_template(tiers: List[str], lengths: List[str]) -> str:
+    """Header + example rows: flat, tier, hair-length and tier × length pricing."""
+    import csv as _csv
+    headers = _service_csv_headers(tiers, lengths)
+    buf = io.StringIO()
+    writer = _csv.writer(buf)
+    writer.writerow(headers)
+
+    def row(base: List[Any], axes: List[str], matrix: Dict[str, float]) -> List[Any]:
+        return base + _service_csv_pricing_cells({"axes": axes, "price_matrix": matrix}, tiers, lengths)
+
+    tier_prices = {t: 300 + 150 * i for i, t in enumerate(tiers)}
+    len_prices = {l: 800 + 300 * j for j, l in enumerate(lengths)}
+    combo_prices = {
+        f"{t}__{l}": 1500 + 500 * i + 400 * j
+        for i, t in enumerate(tiers) for j, l in enumerate(lengths)
+    }
+    writer.writerow(row(["", "Beard Trim", "Shape-up and hot towel", "Services", "Beard", "Men",
+                         "20", "150", "fixed", "false", "false", "", "", "9", "999721"], [], {}))
+    writer.writerow(row(["", "Men's Haircut", "Classic scissor cut with styling", "Services", "Hair", "Men",
+                         "30", min(tier_prices.values(), default=0), "fixed", "true", "false", "", "", "9", "999721"],
+                        ["tier"], tier_prices))
+    writer.writerow(row(["", "Hair Spa", "Nourishing hair spa", "Services", "Hair", "Unisex",
+                         "45", min(len_prices.values(), default=0), "fixed", "false", "true", "", "", "9", "999721"],
+                        ["length"], len_prices))
+    writer.writerow(row(["", "Global Hair Colour", "Full-head colour by stylist level and hair length", "Services",
+                         "Hair", "Women", "120", min(combo_prices.values(), default=0), "onwards", "false", "false",
+                         "", "", "18", "999721"], ["tier", "length"], combo_prices))
+    return buf.getvalue()
 
 
 @api_router.get("/salons/{salon_id}/services/csv-template")
 async def download_services_csv_template(salon_id: str):
-    """Return a ready-to-fill CSV template (headers + two example rows).
+    """Return a ready-to-fill CSV template using this salon's tier and hair-length
+    names for the price:* columns (headers + example rows).
 
     Public so the salon can grab the template before authenticating in the UI.
     """
-    import csv as _csv
-    buf = io.StringIO()
-    writer = _csv.writer(buf)
-    writer.writerow(SERVICE_CSV_HEADERS)
-    writer.writerow([
-        "Haircut - Men", "Classic scissor cut & style", "Hair",
-        "Men", "30", "250", "fixed", "false", "false", "", "",
-    ])
-    writer.writerow([
-        "Hair Spa", "Relaxing nourishing hair spa", "Spa",
-        "Unisex", "45", "600", "onwards", "true", "true", "", "",
-    ])
-    csv_text = buf.getvalue()
+    tiers, lengths = await _salon_tiers_lengths(salon_id)
     return Response(
-        content=csv_text,
+        content=_service_csv_template(tiers, lengths),
         media_type="text/csv",
-        headers={"Content-Disposition": 'attachment; filename="services_template.csv"'},
+        headers={"Content-Disposition": 'attachment; filename="services-upload-template.csv"'},
     )
 
 
@@ -10295,6 +10595,12 @@ async def upload_services_csv(
       available_at_home — true/false (defaults false)
       thumbnail_url  — image URL for the circular category thumbnail
       images         — one or more image URLs separated by | or ,
+      pricing        — flat / tier / length / tier+length (optional; inferred
+                       from the filled price:* columns when blank)
+      price:<Tier>, price:<Length>, price:<Tier>/<Length>
+                     — variant prices, using the salon's tier and hair-length
+                       names (see _parse_service_csv_pricing). With variant
+                       pricing, base_price becomes the lowest variant price.
     """
     salon = await db.salons.find_one({"id": salon_id}, {"_id": 0})
     if not salon:
@@ -10401,6 +10707,16 @@ async def upload_services_csv(
         parts = raw.split("|") if "|" in raw else raw.split(",")
         return [p.strip() for p in parts if p.strip()]
 
+    tiers, lengths = await _salon_tiers_lengths(salon_id)
+
+    def _pricing_fields(pricing: dict) -> dict:
+        """axes/price_matrix (+ derived base_price) — mirrors the service editor."""
+        fields = {"axes": pricing["axes"], "price_matrix": pricing["price_matrix"]}
+        if pricing["axes"]:
+            positive = [v for v in pricing["price_matrix"].values() if v > 0]
+            fields["base_price"] = min(positive) if positive else 0.0
+        return fields
+
     # ---- Dedup against services already present for THIS salon ----
     existing = await db.services.find(
         {"salon_id": salon_id, "is_active": True},
@@ -10463,11 +10779,18 @@ async def upload_services_csv(
             errors.append({"row": row_no, "reason": "Missing service_name"})
             continue
 
+        pricing, pricing_error = _parse_service_csv_pricing(raw, tiers, lengths)
+        if pricing_error:
+            errors.append({"row": row_no, "reason": f"{name}: {pricing_error}"})
+            continue
+
         # UPSERT BY KEY — if service_key matches an existing service in this
         # salon, update it in place (no new service, not a duplicate).
         svc_key = str(_find(raw, "service_key", "servicekey", "key", "service_id", "id") or "").strip()
         if svc_key and svc_key in existing_ids:
             upd = _row_fields(raw, for_update=True)
+            if pricing is not None:
+                upd.update(_pricing_fields(pricing))
             upd["updated_at"] = now_iso
             await db.services.update_one({"id": svc_key, "salon_id": salon_id}, {"$set": upd})
             updated += 1
@@ -10486,6 +10809,9 @@ async def upload_services_csv(
             "id": str(uuid.uuid4()),
             "salon_id": salon_id,
             **_row_fields(raw, for_update=False),
+            "axes": [],
+            "price_matrix": {},
+            **(_pricing_fields(pricing) if pricing is not None else {}),
             "is_active": True,
             "is_enabled": True,
             "source": "csv_upload",
@@ -10566,12 +10892,8 @@ async def export_services_csv(
         {"salon_id": salon_id, "is_active": True}, {"_id": 0}
     ).sort("service_name", 1).to_list(10000)
 
-    headers = [
-        "service_key", "service_name", "description", "category", "sub_category",
-        "gender_tag", "default_duration", "base_price", "price_type",
-        "is_favorite", "available_at_home", "thumbnail_url", "images",
-        "gst_rate", "hsn_code",
-    ]
+    tiers, lengths = await _salon_tiers_lengths(salon_id)
+    headers = _service_csv_headers(tiers, lengths)
     buf = io.StringIO()
     writer = _csv.writer(buf)
     writer.writerow(headers)
@@ -10593,6 +10915,7 @@ async def export_services_csv(
             "|".join(imgs) if isinstance(imgs, list) else (imgs or ""),
             s.get("gst_rate") if s.get("gst_rate") is not None else "",
             s.get("hsn_code") or "",
+            *_service_csv_pricing_cells(s, tiers, lengths),
         ])
     return Response(
         content=buf.getvalue(),
@@ -10602,23 +10925,17 @@ async def export_services_csv(
 
 
 # ---- Upload template + history + rollback ------------------------------------
-SERVICES_CSV_TEMPLATE = (
-    "service_key,service_name,description,category,sub_category,gender_tag,default_duration,base_price,price_type,is_favorite,available_at_home,thumbnail_url,images,gst_rate,hsn_code\n"
-    ",Men's Haircut,Classic scissor cut with styling,Services,Hair,Men,30,300,fixed,true,false,,,9,999721\n"
-    ",Beard Trim,Shape-up and hot towel,Services,Beard,Men,20,150,fixed,false,false,,,9,999721\n"
-    ",Women's Haircut,Wash + cut + blow-dry,Services,Hair,Women,45,600,fixed,true,false,,,9,999721\n"
-    ",Classic Manicure,Nail shaping + cuticle care,Services,Nails,Unisex,30,400,fixed,false,true,,,9,999721\n"
-    ",Bridal Glow Package,Facial + hair spa + mani-pedi,Packages,Bridal,Women,180,4999,onwards,true,false,,,9,999721\n"
-)
 
 
 @api_router.get("/services/upload-template.csv")
 async def download_services_csv_template_generic():
     """Return a small illustrative CSV so owners know the exact column headers.
-    Available to any authenticated salon; no salon_id required."""
+    Available to any authenticated salon; no salon_id required, so the price:*
+    columns use the default tier and hair-length names — prefer the
+    salon-specific /salons/{salon_id}/services/csv-template."""
     from fastapi.responses import Response
     return Response(
-        content=SERVICES_CSV_TEMPLATE,
+        content=_service_csv_template(DEFAULT_TIERS, DEFAULT_LENGTHS),
         media_type="text/csv",
         headers={
             "Content-Disposition": 'attachment; filename="services-upload-template.csv"'

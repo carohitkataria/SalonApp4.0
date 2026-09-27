@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import axios from 'axios';
+import { serviceCategoryOf } from '@/lib/serviceCategory';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -54,12 +55,15 @@ export default function SalonMenuPage() {
     const q = search.trim().toLowerCase();
     (menu?.services || []).forEach((s) => {
       if (q && !(s.service_name || '').toLowerCase().includes(q)
-            && !(s.sub_category || s.category || '').toLowerCase().includes(q)) return;
-      const cat = s.sub_category || s.category || 'General';
+            && !serviceCategoryOf(s).toLowerCase().includes(q)) return;
+      const cat = serviceCategoryOf(s);
       if (!out[cat]) out[cat] = [];
       out[cat].push(s);
     });
-    return out;
+    // Categories follow the salon's master order (backend `category_order`).
+    const order = (menu?.category_order || []).map((n) => String(n).toLowerCase());
+    const rank = (n) => { const i = order.indexOf(String(n).toLowerCase()); return i === -1 ? Infinity : i; };
+    return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (rank(a) - rank(b)) || a.localeCompare(b)));
   }, [menu, search]);
 
   const toggle = (id) => {
