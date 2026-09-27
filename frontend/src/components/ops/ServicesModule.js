@@ -333,6 +333,20 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
     return g;
   }, [filtered, groupKey]);
 
+  // Category choices for the editors: the saved classification list first, then
+  // every category already used by a service / package (most salons only ever
+  // set categories on the services themselves, so the saved list is often empty).
+  const svcCats = useMemo(() => {
+    const names = (cls.categories || []).map((c) => c.name).filter(Boolean);
+    const used = services.filter((x) => !isPkg(x)).map((x) => x.sub_category).filter(Boolean);
+    return [...new Set([...names, ...[...new Set(used)].sort((a, b) => a.localeCompare(b))])];
+  }, [cls.categories, services]);
+  const pkgCats = useMemo(() => {
+    const names = (cls.package_categories || []).filter(Boolean);
+    const used = services.filter(isPkg).map((x) => x.sub_category).filter(Boolean);
+    return [...new Set([...names, ...[...new Set(used)].sort((a, b) => a.localeCompare(b))])];
+  }, [cls.package_categories, services]);
+
   const catThumb = useCallback((name) => {
     const c = (cls.categories || []).find((x) => x.name === name);
     return c && c.thumbnail_url ? c.thumbnail_url : null;
@@ -471,8 +485,8 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
           {!selService
             ? <div className="editempty">Select an item, or press + to add one.</div>
             : (selService.category === 'Packages'
-              ? <PackageEditor key={selService.id || 'new-pkg'} initial={selService} services={services} salonId={salonId} H={H} cls={cls} onDone={(deleted) => { setSel(null); load(); }} />
-              : <ServiceEditor key={selService.id || 'new-svc'} initial={selService} salonId={salonId} H={H} cls={cls} onDone={() => { setSel(null); load(); }} />)}
+              ? <PackageEditor key={selService.id || 'new-pkg'} initial={selService} services={services} salonId={salonId} H={H} cls={cls} allCats={pkgCats} onDone={(deleted) => { setSel(null); load(); }} />
+              : <ServiceEditor key={selService.id || 'new-svc'} initial={selService} salonId={salonId} H={H} cls={cls} allCats={svcCats} onDone={() => { setSel(null); load(); }} />)}
         </div>
       </div>
 
@@ -483,8 +497,17 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
   );
 }
 
+/* Category <select> helper: the "+ New category…" entry asks for a name; the
+   category comes into existence once a service/package is saved under it. */
+const NEW_CATEGORY = '__new_category__';
+const pickCategory = (value) => {
+  if (value !== NEW_CATEGORY) return value;
+  const name = (window.prompt('New category name') || '').trim().slice(0, 60);
+  return name || null;
+};
+
 /* ============================ SERVICE EDITOR ============================ */
-function ServiceEditor({ initial, salonId, H, cls, onDone }) {
+function ServiceEditor({ initial, salonId, H, cls, allCats, onDone }) {
   const [s, setS] = useState(initial);
   useEffect(() => { setS(initial); }, [initial]);
   const [saving, setSaving] = useState(false);
@@ -493,11 +516,11 @@ function ServiceEditor({ initial, salonId, H, cls, onDone }) {
   const useTier = axes.includes('tier');
   const useLen = axes.includes('length');
   const catOptions = useMemo(() => {
-    const names = (cls.categories || []).map((c) => c.name);
+    const names = [...(allCats || (cls.categories || []).map((c) => c.name))];
     if (s.sub_category && !names.includes(s.sub_category)) names.push(s.sub_category);
     if (!names.length) names.push('General');
     return names;
-  }, [cls.categories, s.sub_category]);
+  }, [allCats, cls.categories, s.sub_category]);
 
   const toggleAxis = (axis) => {
     setS((p) => {
@@ -585,8 +608,9 @@ function ServiceEditor({ initial, salonId, H, cls, onDone }) {
         <div className="cl">{I.list}Basics</div>
         <div className="grid2">
           <div className="f"><label>Category</label>
-            <select value={s.sub_category || ''} onChange={(e) => set('sub_category', e.target.value)} data-testid="svc-ed-cat">
+            <select value={s.sub_category || ''} onChange={(e) => { const v = pickCategory(e.target.value); if (v) set('sub_category', v); }} data-testid="svc-ed-cat">
               {catOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              <option value={NEW_CATEGORY}>+ New category…</option>
             </select>
           </div>
           <div className="f"><label>Duration (min)</label><input className="num" type="number" value={s.default_duration || ''} onChange={(e) => set('default_duration', e.target.value)} /></div>
@@ -675,7 +699,7 @@ function ServiceEditor({ initial, salonId, H, cls, onDone }) {
 }
 
 /* ============================ PACKAGE EDITOR ============================ */
-function PackageEditor({ initial, services, salonId, H, cls, onDone }) {
+function PackageEditor({ initial, services, salonId, H, cls, allCats, onDone }) {
   const [p, setP] = useState(initial);
   useEffect(() => { setP(initial); }, [initial]);
   const [saving, setSaving] = useState(false);
@@ -684,11 +708,11 @@ function PackageEditor({ initial, services, salonId, H, cls, onDone }) {
   const items = p.package_items || [];
   const itemsSum = items.reduce((a, i) => a + (Number(i.price) || 0), 0);
   const catOptions = useMemo(() => {
-    const names = [...(cls.package_categories || [])];
+    const names = [...(allCats || cls.package_categories || [])];
     if (p.sub_category && !names.includes(p.sub_category)) names.push(p.sub_category);
     if (!names.length) names.push('General');
     return names;
-  }, [cls.package_categories, p.sub_category]);
+  }, [allCats, cls.package_categories, p.sub_category]);
 
   const setItem = (i, k, v) => setP((x) => { const arr = [...(x.package_items || [])]; arr[i] = { ...arr[i], [k]: v }; return { ...x, package_items: arr }; });
   const addItem = () => setP((x) => ({ ...x, package_items: [...(x.package_items || []), { service_id: avail[0]?.id || '', day_offset: 0, price: avail[0]?.base_price || 0 }] }));
@@ -755,8 +779,9 @@ function PackageEditor({ initial, services, salonId, H, cls, onDone }) {
         <div className="cl">{I.list}Basics</div>
         <div className="grid2">
           <div className="f"><label>Category</label>
-            <select value={p.sub_category} onChange={(e) => set('sub_category', e.target.value)}>
+            <select value={p.sub_category} onChange={(e) => { const v = pickCategory(e.target.value); if (v) set('sub_category', v); }}>
               {catOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              <option value={NEW_CATEGORY}>+ New category…</option>
             </select>
           </div>
           <div className="f"><label>Gender</label>
