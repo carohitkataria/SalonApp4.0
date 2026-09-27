@@ -624,7 +624,7 @@ export const HOME_V2_CSS = `
 .shv2-drawer.newapt .drawer__h .tt .ic{background:var(--primary-050);color:var(--primary)}
 .shv2-drawer.newapt .drawer__close:hover{background:var(--rose-bg);color:var(--rose)}
 .shv2-drawer.newapt .book-split{display:grid;grid-template-columns:minmax(0,1.4fr) 74px minmax(322px,.92fr);flex:1;overflow:hidden;background:var(--bg)}
-.shv2-drawer.newapt .book-left{overflow-y:auto;padding:16px 14px;background:#FFF;border-right:1px solid var(--line)}
+.shv2-drawer.newapt .book-left{overflow-y:auto;padding:16px 14px;background:#FFF;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
 .shv2-drawer.newapt .book-mid{overflow:hidden;display:flex;flex-direction:column;background:var(--pink-bg);border-right:1px solid var(--pink-100)}
 .shv2-drawer.newapt .book-right{overflow-y:auto;padding:16px 18px;background:#FAFAFF}
 
@@ -695,7 +695,14 @@ export const HOME_V2_CSS = `
 .shv2-drawer.newapt .cat-bullets button.on{border-color:var(--cc,var(--primary));color:var(--cc,var(--primary));background:var(--ccbg,var(--primary-050))}
 
 /* catalog grid */
-.shv2-drawer.newapt .catalog{max-height:290px;overflow-y:auto;padding:2px 4px 2px 2px}
+/* The services block fills the rest of the left column and only the catalog
+   scrolls, so the grid uses all the height below the filters. min-height keeps
+   it usable on short screens (the column scrolls instead). */
+.shv2-drawer.newapt .apt-svcblock{flex:1 1 0;min-height:320px;display:flex;flex-direction:column;margin-bottom:0}
+.shv2-drawer.newapt .apt-svcblock>*{flex:none}
+.shv2-drawer.newapt .apt-svcblock>.apt-catbody{flex:1 1 0;min-height:0;display:flex;gap:9px;align-items:stretch}
+.shv2-drawer.newapt .apt-catbody>.apt-vrail{flex:none;align-self:flex-start}
+.shv2-drawer.newapt .catalog{flex:1 1 auto;min-width:0;overflow-y:auto;padding:2px 4px 2px 2px}
 .shv2-drawer.newapt .cat-lbl{font-size:9.5px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--muted-2);margin:8px 0 6px}
 .shv2-drawer.newapt .cat-lbl:first-child{margin-top:0}
 .shv2-drawer.newapt .svc-sub{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:9px}
@@ -877,9 +884,32 @@ export const HOME_V2_CSS = `
 /* responsive */
 @media(max-width:1040px){
   .shv2-drawer.newapt{width:100vw}
-  .shv2-drawer.newapt .book-split{grid-template-columns:1fr;overflow-y:auto}
+  /* Stack the sections as one normal scrolling page — each section keeps its
+     natural height instead of being squeezed into a slice of the screen. */
+  .shv2-drawer.newapt .book-split{display:block;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  .shv2-drawer.newapt .book-left,.shv2-drawer.newapt .book-mid,.shv2-drawer.newapt .book-right{overflow:visible;height:auto}
   .shv2-drawer.newapt .book-left,.shv2-drawer.newapt .book-mid{border-right:none;border-bottom:1px solid var(--line)}
-  .shv2-drawer.newapt .bmr__list{flex-direction:row;overflow-x:auto;padding:10px 14px}
+  .shv2-drawer.newapt .book-left{display:block;padding:12px 12px 14px}
+  .shv2-drawer.newapt .apt-svcblock{display:block;min-height:0}
+  /* Tier / length picker becomes a horizontal strip above the grid so the
+     cards get the full width (two per row on phones). */
+  .shv2-drawer.newapt .apt-svcblock>.apt-catbody{display:flex;flex-direction:column;gap:8px}
+  .shv2-drawer.newapt .apt-catbody>.apt-vrail{position:static;align-self:stretch;flex-direction:row;align-items:center;gap:8px;overflow-x:auto;scrollbar-width:none}
+  .shv2-drawer.newapt .apt-vrail .vr-grp{flex-direction:row;align-items:center;flex:none}
+  .shv2-drawer.newapt .apt-vrail .vr-lbl{margin-right:2px}
+  .shv2-drawer.newapt .apt-vrail .vr-sep{width:1.5px;height:22px;margin:0 2px;flex:none}
+  .shv2-drawer.newapt .apt-vrail button{width:auto;min-width:44px;padding:6px 9px;flex:none}
+  /* Tall enough to browse, short enough to reach barbers/guest by scrolling. */
+  .shv2-drawer.newapt .catalog{max-height:min(62vh,620px);max-height:min(62dvh,620px)}
+  .shv2-drawer.newapt .book-mid{display:block}
+  .shv2-drawer.newapt .bmr__h{padding:10px 14px 0;text-align:left}
+  .shv2-drawer.newapt .bmr__h .t{justify-content:flex-start}
+  .shv2-drawer.newapt .bmr__list{flex-direction:row;overflow-x:auto;overflow-y:hidden;padding:10px 14px 12px;align-items:flex-start}
+  .shv2-drawer.newapt .bmr__list .barber{flex:none}
+  .shv2-drawer.newapt .book-right{padding:14px 12px}
+}
+@media(max-width:560px){
+  .shv2-drawer.newapt .svc-sub{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
 }
 
 /* redesign 2026 — offering-type tabs (row 1) + inline top-panel fields */

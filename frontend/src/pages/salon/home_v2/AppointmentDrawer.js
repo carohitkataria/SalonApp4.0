@@ -838,7 +838,6 @@ export default function AppointmentDrawer({
           .newapt .apt-fav-chip .apt-fav-star{font-size:18px;line-height:1;color:#C9992B}
           .newapt .apt-fav-chip.on{background:#C9992B !important;border-color:#C9992B !important}
           .newapt .apt-fav-chip.on .apt-fav-star{color:#fff}
-          .newapt .apt-catbody.has-rail{display:grid;grid-template-columns:auto 1fr;gap:9px;align-items:start}
           .newapt .apt-catbody .catalog{min-width:0}
           .newapt .apt-vrail{display:flex;flex-direction:column;gap:5px;padding:6px 5px;border:1.5px solid #ECECF3;border-radius:11px;background:#FBFBFE;align-self:start;position:sticky;top:0}
           .newapt .apt-vrail .vr-grp{display:flex;flex-direction:column;gap:4px}
@@ -929,7 +928,7 @@ export default function AppointmentDrawer({
             {/* Guest search relocated to the right "Guest details" card (redesign 2026). */}
 
             {/* Services & membership — title + search in one row (Feb 2026) */}
-            <div className="block">
+            <div className="block apt-svcblock">
               <div className="fs-title" style={{ margin: '2px 0 10px' }}>
                 <span className="dot" style={{ ['--sc']: '#6C4FE0' }} />
                 <span>Services &amp; membership <span className="req">*</span></span>
