@@ -713,6 +713,9 @@ export const HOME_V2_CSS = `
 .shv2-drawer.newapt .svc-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--cc,var(--primary))}
 .shv2-drawer.newapt .svc-card:hover{border-color:var(--cc,var(--primary-100));transform:translateY(-1px)}
 .shv2-drawer.newapt .svc-card.on{border-color:var(--cc,var(--primary));background:var(--ccbg,var(--primary-050))}
+.shv2-drawer.newapt .svc-card.na{--cc:#B8BCC8;--ccbg:#F3F3F8;background:#F6F6F9;opacity:.62;filter:grayscale(1)}
+.shv2-drawer.newapt .svc-card.na:not(.on){cursor:not-allowed}
+.shv2-drawer.newapt .svc-card.na:not(.on):hover{transform:none;border-color:var(--line)}
 .shv2-drawer.newapt .svc-thumb{width:46px;height:46px;border-radius:10px;flex:none;background-size:cover;background-position:center;background-color:var(--ccbg,var(--primary-050));display:grid;place-items:center;color:var(--cc,var(--primary))}
 .shv2-drawer.newapt .svc-thumb svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8}
 .shv2-drawer.newapt .svc-meta{flex:1;min-width:0;display:flex;flex-direction:column}
