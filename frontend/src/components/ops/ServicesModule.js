@@ -882,7 +882,8 @@ function ClassificationDrawer({ open, onClose, salonId, H, cls, setCls }) {
 }
 
 function UploadDrawer({ open, onClose, salonId, H, reload }) {
-  const href = `${API}/services/upload-template.csv`;
+  // Salon-specific template: its price:* columns use this salon's tier / hair-length names.
+  const href = `${API}/salons/${salonId}/services/csv-template`;
   const fileRef = useRef(null);
   const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -897,6 +898,14 @@ function UploadDrawer({ open, onClose, salonId, H, reload }) {
         headers: { ...(H()?.headers || {}), 'Content-Type': 'multipart/form-data' },
       });
       toast.success(res.data?.message || 'Upload complete');
+      const errs = res.data?.errors || [];
+      if (errs.length) {
+        const shown = errs.slice(0, 3).map((er) => `Row ${er.row}: ${er.reason}`).join(' · ');
+        toast.warning(`${errs.length} row(s) skipped`, {
+          description: errs.length > 3 ? `${shown} · …and ${errs.length - 3} more` : shown,
+          duration: 12000,
+        });
+      }
       reload?.();
       onClose?.();
     } catch (e) {
@@ -941,6 +950,7 @@ function UploadDrawer({ open, onClose, salonId, H, reload }) {
             <li>The export &amp; template share the same columns, keyed by <span className="codepill">service_key</span>.</li>
             <li>Blank <span className="codepill">service_key</span> → <b>creates</b> a new service (key auto-generated).</li>
             <li>Existing <span className="codepill">service_key</span> → <b>updates</b> that service in place.</li>
+            <li>Tier / hair-length prices: set <span className="codepill">pricing</span> to <b>tier</b>, <b>length</b> or <b>tier+length</b> and fill the matching <span className="codepill">price:Premium</span>, <span className="codepill">price:Long</span> or <span className="codepill">price:Premium/Long</span> columns. Leave <span className="codepill">pricing</span> blank on an existing service to keep its current prices; <b>flat</b> removes them.</li>
           </ol>
         </div>
       </div>
