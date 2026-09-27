@@ -12,6 +12,7 @@
  */
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import axios from 'axios';
+import { serviceCategoryOf } from '@/lib/serviceCategory';
 import { toast } from 'sonner';
 import { useQuery } from '@tanstack/react-query';
 import { useClassification, useOpsSettings, useInvalidateSalonData, qk } from '@/lib/salonQueries';
@@ -313,7 +314,7 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
   // (Haircut, Hair Spa, Facial…). Group BOTH services & packages by the L2
   // category so the Service page matches the appointment/customer/report views.
   const groupKey = useCallback(
-    (s) => (s.sub_category || 'General'),
+    (s) => serviceCategoryOf(s),
     [],
   );
 
@@ -490,7 +491,7 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
         </div>
       </div>
 
-      <ClassificationDrawer open={classOpen} onClose={() => setClassOpen(false)} salonId={salonId} H={H} cls={cls} setCls={setCls} />
+      <ClassificationDrawer open={classOpen} onClose={() => setClassOpen(false)} salonId={salonId} H={H} cls={cls} setCls={setCls} reload={load} />
       <UploadDrawer open={uploadOpen} onClose={() => setUploadOpen(false)} salonId={salonId} H={H} reload={load} />
       <OnlinePriceDrawer open={onlineOpen} onClose={() => setOnlineOpen(false)} salonId={salonId} H={H} ops={ops} setOps={setOps} />
     </div>
@@ -507,9 +508,13 @@ const pickCategory = (value) => {
 };
 
 /* ============================ SERVICE EDITOR ============================ */
+// Legacy services keep their category in `category`; start the editor from the
+// resolved category so the dropdown shows (and saving keeps) the right one.
+const withCategory = (x) => (x && !x.sub_category ? { ...x, sub_category: serviceCategoryOf(x) } : x);
+
 function ServiceEditor({ initial, salonId, H, cls, allCats, onDone }) {
-  const [s, setS] = useState(initial);
-  useEffect(() => { setS(initial); }, [initial]);
+  const [s, setS] = useState(() => withCategory(initial));
+  useEffect(() => { setS(withCategory(initial)); }, [initial]);
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setS((p) => ({ ...p, [k]: v }));
   const axes = s.axes || [];
@@ -846,23 +851,25 @@ function ThumbCard({ value, onUrl, onFile }) {
 }
 
 /* ============================ DRAWERS ============================ */
-function ClassificationDrawer({ open, onClose, salonId, H, cls, setCls }) {
+// Categories keep their original name (`_orig`) so a rename can move the
+// services that use it; new rows have none.
+const withOrig = (c) => ({ ...c, categories: (c.categories || []).map((x) => ({ ...x, _orig: x.name })) });
+
+function ClassificationDrawer({ open, onClose, salonId, H, cls, setCls, reload }) {
   const [tab, setTab] = useState('category');
-  const [local, setLocal] = useState(cls);
-  useEffect(() => { if (open) setLocal(cls); }, [open, cls]);
+  const [local, setLocal] = useState(() => withOrig(cls));
+  useEffect(() => { if (open) setLocal(withOrig(cls)); }, [open, cls]);
   const [saving, setSaving] = useState(false);
 
   const listFor = () => tab === 'category' ? (local.categories || []).map((c) => c.name) : tab === 'tier' ? (local.tiers || []) : (local.lengths || []);
-  const setListFor = (arr, catThumbs) => {
-    setLocal((l) => {
-      if (tab === 'category') return { ...l, categories: arr.map((name, i) => ({ name, thumbnail_url: (catThumbs || (l.categories || []).map((c) => c.thumbnail_url))[i] || '' })) };
-      if (tab === 'tier') return { ...l, tiers: arr };
-      return { ...l, lengths: arr };
-    });
-  };
-  const rename = (i, v) => { const a = listFor(); a[i] = v; setListFor([...a]); };
-  const add = () => { const a = listFor(); a.push(tab === 'category' ? 'New category' : 'New'); setListFor([...a]); };
-  const rm = (i) => { const a = listFor(); a.splice(i, 1); setListFor([...a]); };
+  const editList = (fn) => setLocal((l) => {
+    if (tab === 'category') { const cats = [...(l.categories || [])]; fn(cats, true); return { ...l, categories: cats }; }
+    const key = tab === 'tier' ? 'tiers' : 'lengths';
+    const arr = [...(l[key] || [])]; fn(arr, false); return { ...l, [key]: arr };
+  });
+  const rename = (i, v) => editList((a, isCat) => { a[i] = isCat ? { ...a[i], name: v } : v; });
+  const add = () => editList((a, isCat) => { a.push(isCat ? { name: 'New category', thumbnail_url: '' } : 'New'); });
+  const rm = (i) => editList((a) => { a.splice(i, 1); });
   const setCatThumb = async (i, e) => {
     const f = e.target.files?.[0]; if (!f) return;
     const url = await fileToDataUrl(f);
@@ -872,13 +879,20 @@ function ClassificationDrawer({ open, onClose, salonId, H, cls, setCls }) {
   const save = async () => {
     setSaving(true);
     try {
+      const cats = local.categories || [];
+      const renames = {};
+      cats.forEach((c) => { if (c._orig && c.name.trim() && c._orig !== c.name.trim()) renames[c._orig] = c.name.trim(); });
       const res = await axios.put(`${API}/salons/${salonId}/classification`, {
-        tiers: local.tiers, lengths: local.lengths, categories: local.categories, package_categories: local.package_categories,
+        tiers: local.tiers, lengths: local.lengths,
+        categories: cats.map(({ _orig, ...c }) => c),
+        renames,
+        package_categories: local.package_categories,
       }, H());
       setCls((c) => ({ ...c, ...res.data }));
       toast.success('Classification saved');
+      if (Object.keys(renames).length) reload?.();
       onClose();
-    } catch { toast.error('Save failed'); }
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Save failed'); }
     finally { setSaving(false); }
   };
 

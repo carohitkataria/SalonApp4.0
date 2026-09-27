@@ -6165,8 +6165,15 @@ async def get_salon_menu(salon_id: str, branch: Optional[str] = None):
         if svc["id"] in override_map:
             svc["base_price"] = override_map[svc["id"]]
 
-    # Group by category, sorted
-    services.sort(key=lambda s: (s.get("category") or "General", s.get("service_name") or ""))
+    # Group by category in the salon's master order (Services → Manage
+    # classification); categories not in that list go last, alphabetically.
+    cls_doc = await db.salon_classification.find_one({"salon_id": salon_id}, {"_id": 0})
+    if cls_doc is not None:
+        cls_doc = await _sync_salon_categories(salon_id, cls_doc)
+    category_order = [c.get("name") for c in ((cls_doc or {}).get("categories") or []) if c.get("name")]
+    rank = {n.lower(): i for i, n in enumerate(category_order)}
+    services.sort(key=lambda s: (rank.get(_svc_bucket(s).lower(), len(rank)), _svc_bucket(s).lower(),
+                                 s.get("service_name") or ""))
 
     return {
         "salon": {
@@ -6191,6 +6198,7 @@ async def get_salon_menu(salon_id: str, branch: Optional[str] = None):
             else None
         ),
         "services": services,
+        "category_order": category_order,
     }
 
 @api_router.get("/salons/{salon_id}/services/all")
@@ -6327,6 +6335,12 @@ async def resolve_service_category(salon_id: str, category_id: Optional[str], ca
 @api_router.get("/salons/{salon_id}/categories")
 async def list_categories(salon_id: str, type: str = "service", include_inactive: bool = False):
     """Single source of truth read by all three surfaces (customer, staff, salon)."""
+    if type == "service":
+        cls_doc = await db.salon_classification.find_one({"salon_id": salon_id}, {"_id": 0})
+        if cls_doc is not None:
+            await _sync_salon_categories(salon_id, cls_doc)
+            await _mirror_categories_collection(salon_id, (await db.salon_classification.find_one(
+                {"salon_id": salon_id}, {"_id": 0}) or {}).get("categories") or [])
     q = {"salon_id": salon_id, "type": type}
     if not include_inactive:
         q["active"] = True
@@ -6411,6 +6425,101 @@ DEFAULT_OPS_SETTINGS = {
 }
 
 
+# ---- Category taxonomy sync ------------------------------------------------
+# `salon_classification.categories` (edited in Services → Manage classification)
+# is the master list of service categories. Categories are also stored on each
+# service (`sub_category`) and mirrored into the WS4 `categories` collection,
+# which the customer booking page reads for order + thumbnails. These helpers
+# keep all three in step:
+#   * any category a service uses is appended to the master list,
+#   * the master list's order / thumbnails are mirrored to `categories`.
+
+
+def _svc_bucket(svc: dict) -> str:
+    """The category a service is shown under (same rule as the UIs)."""
+    cat = (svc.get("category") or "").strip()
+    sub = (svc.get("sub_category") or "").strip()
+    if sub:
+        return sub
+    return cat if cat and cat.lower() not in ("services", "packages", "package") else "General"
+
+
+def _is_package(svc: dict) -> bool:
+    return (svc.get("category") or "").strip().lower() in ("packages", "package")
+
+
+async def _salon_visible_services(salon_id: str, projection: Optional[dict] = None) -> List[dict]:
+    """Services the salon sees: owned, or linked via salon_services (as /services/all)."""
+    links = await db.salon_services.find({"salon_id": salon_id}, {"_id": 0, "service_id": 1}).to_list(5000)
+    ids = [l["service_id"] for l in links if l.get("service_id")]
+    query = {"is_active": True, "$or": [{"salon_id": salon_id}] + ([{"id": {"$in": ids}}] if ids else [])}
+    return await db.services.find(query, projection or {"_id": 0}).to_list(5000)
+
+
+async def _used_categories(salon_id: str):
+    """(service categories, package categories) in use, in first-seen order."""
+    svcs = await _salon_visible_services(salon_id, {"_id": 0, "category": 1, "sub_category": 1})
+    svc_cats, pkg_cats = [], []
+    for x in svcs:
+        target = pkg_cats if _is_package(x) else svc_cats
+        b = _svc_bucket(x)
+        if b not in target:
+            target.append(b)
+    return svc_cats, pkg_cats
+
+
+async def _mirror_categories_collection(salon_id: str, categories: List[dict]) -> None:
+    """Mirror the master list (order + thumbnails) into the WS4 collection."""
+    existing = await db.categories.find({"salon_id": salon_id, "type": "service"}, {"_id": 0}).to_list(1000)
+    by_slug = {c.get("slug"): c for c in existing}
+    master_slugs = set()
+    for i, c in enumerate(categories):
+        slug = slugify_name(c["name"])
+        master_slugs.add(slug)
+        cur = by_slug.get(slug) or await ensure_category(salon_id, "service", c["name"])
+        want = {"name": c["name"], "sort_order": i, "active": True}
+        if c.get("thumbnail_url"):
+            want["thumbnail_url"] = c["thumbnail_url"]
+        diff = {k: v for k, v in want.items() if cur.get(k) != v}
+        if diff:
+            await db.categories.update_one({"id": cur["id"]}, {"$set": diff})
+    # Categories removed from the master list stop showing to customers.
+    for c in existing:
+        if c.get("slug") not in master_slugs and c.get("active", True):
+            await db.categories.update_one({"id": c["id"]}, {"$set": {"active": False}})
+
+
+async def _sync_salon_categories(salon_id: str, doc: dict) -> dict:
+    """Append in-use categories missing from the master lists (never removes);
+    persist + mirror only when something changed. Returns the updated doc."""
+    svc_used, pkg_used = await _used_categories(salon_id)
+    cats = [dict(c) for c in (doc.get("categories") or []) if (c.get("name") or "").strip()]
+    pkg_cats = [p for p in (doc.get("package_categories") or []) if str(p).strip()]
+    changed = False
+    have = {c["name"].strip().lower() for c in cats}
+    if svc_used:
+        # Thumbnails already set in the WS4 collection carry over to the master list.
+        ws4 = {c.get("slug"): c for c in await db.categories.find(
+            {"salon_id": salon_id, "type": "service"}, {"_id": 0}).to_list(1000)}
+        for name in svc_used:
+            if name.lower() not in have:
+                cats.append({"name": name, "thumbnail_url": (ws4.get(slugify_name(name)) or {}).get("thumbnail_url") or ""})
+                have.add(name.lower())
+                changed = True
+    have_p = {p.strip().lower() for p in pkg_cats}
+    for name in pkg_used:
+        if name.lower() not in have_p:
+            pkg_cats.append(name)
+            have_p.add(name.lower())
+            changed = True
+    if changed:
+        await db.salon_classification.update_one(
+            {"salon_id": salon_id},
+            {"$set": {"categories": cats, "package_categories": pkg_cats, "salon_id": salon_id}}, upsert=True)
+        await _mirror_categories_collection(salon_id, cats)
+    return {**doc, "categories": cats, "package_categories": pkg_cats}
+
+
 @api_router.get("/salons/{salon_id}/classification")
 async def get_salon_classification(salon_id: str):
     """Tier + hair-length + category classification sets used by the price
@@ -6421,6 +6530,7 @@ async def get_salon_classification(salon_id: str):
         doc = {"salon_id": salon_id, "tiers": DEFAULT_TIERS[:], "lengths": DEFAULT_LENGTHS[:],
                "categories": [], "package_categories": []}
         await db.salon_classification.insert_one(dict(doc))
+    doc = await _sync_salon_categories(salon_id, doc)
     return {
         "tiers": doc.get("tiers") or DEFAULT_TIERS[:],
         "lengths": doc.get("lengths") or DEFAULT_LENGTHS[:],
@@ -6436,6 +6546,12 @@ async def update_salon_classification(salon_id: str, body: dict, current_salon=D
         updates["tiers"] = [str(t).strip() for t in body["tiers"] if str(t).strip()]
     if isinstance(body.get("lengths"), list):
         updates["lengths"] = [str(l).strip() for l in body["lengths"] if str(l).strip()]
+    # Optional {old_name: new_name} maps sent by the classification drawer when
+    # a category is renamed, so the salon's services move with it.
+    renames = {str(k).strip(): str(v).strip() for k, v in (body.get("renames") or {}).items()
+               if str(k).strip() and str(v).strip() and str(k).strip() != str(v).strip()}
+    pkg_renames = {str(k).strip(): str(v).strip() for k, v in (body.get("package_renames") or {}).items()
+                   if str(k).strip() and str(v).strip() and str(k).strip() != str(v).strip()}
     if isinstance(body.get("categories"), list):
         cats = []
         for c in body["categories"]:
@@ -6446,10 +6562,44 @@ async def update_salon_classification(salon_id: str, body: dict, current_salon=D
         updates["categories"] = cats
     if isinstance(body.get("package_categories"), list):
         updates["package_categories"] = [str(p).strip() for p in body["package_categories"] if str(p).strip()]
+
+    # A category still used by services can't be removed (it would just come
+    # back on the next sync). Renames are applied first.
+    if "categories" in updates or "package_categories" in updates:
+        svc_used, pkg_used = await _used_categories(salon_id)
+        checks = []
+        if "categories" in updates:
+            keep = {c["name"].lower() for c in updates["categories"]}
+            checks.append(([u for u in svc_used if renames.get(u, u).lower() not in keep], False))
+        if "package_categories" in updates:
+            keep_p = {p.lower() for p in updates["package_categories"]}
+            checks.append(([u for u in pkg_used if pkg_renames.get(u, u).lower() not in keep_p], True))
+        for removed, is_pkg in checks:
+            if removed:
+                svcs = await _salon_visible_services(salon_id, {"_id": 0, "category": 1, "sub_category": 1})
+                n = sum(1 for x in svcs if _is_package(x) == is_pkg and _svc_bucket(x) in removed)
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{', '.join(removed)} still {'has' if len(removed) == 1 else 'have'} {n} "
+                           f"{'package' if is_pkg else 'service'}(s). Move them to another category first.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for old, new in renames.items():
+        await db.services.update_many(
+            {"salon_id": salon_id, "is_active": True, "category": {"$nin": ["Packages", "Package"]}, "sub_category": old},
+            {"$set": {"sub_category": new, "updated_at": now_iso}})
+    for old, new in pkg_renames.items():
+        await db.services.update_many(
+            {"salon_id": salon_id, "is_active": True, "category": {"$in": ["Packages", "Package"]}, "sub_category": old},
+            {"$set": {"sub_category": new, "updated_at": now_iso}})
+
     if updates:
         await db.salon_classification.update_one(
             {"salon_id": salon_id}, {"$set": {**updates, "salon_id": salon_id}}, upsert=True)
     doc = await db.salon_classification.find_one({"salon_id": salon_id}, {"_id": 0}) or {}
+    if "categories" in updates:
+        await _mirror_categories_collection(salon_id, doc.get("categories") or [])
+    doc = await _sync_salon_categories(salon_id, doc)
     return {
         "tiers": doc.get("tiers") or DEFAULT_TIERS[:],
         "lengths": doc.get("lengths") or DEFAULT_LENGTHS[:],

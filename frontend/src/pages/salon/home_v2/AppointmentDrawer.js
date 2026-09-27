@@ -21,6 +21,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import axios from 'axios';
+import { serviceCategoryOf } from '@/lib/serviceCategory';
 import CustomerDrawer from './CustomerDrawer';
 import GuestProfileModal from './GuestProfileModal';
 
@@ -312,7 +313,7 @@ export default function AppointmentDrawer({
     return (c === 'packages' || c === 'package') ? 'pkg' : 'svc';
   };
   // Fine-grained bucket for the 2nd filter row (post taxonomy migration).
-  const subCatOf = (s) => s.sub_category || s.category || 'General';
+  const subCatOf = (s) => serviceCategoryOf(s);
 
   const genderMatch = (s) => {
     const t = s.gender_tag || 'Unisex';
@@ -326,9 +327,15 @@ export default function AppointmentDrawer({
     services.forEach((s) => {
       if (svcTypeOf(s) === offerType && genderMatch(s)) set.add(subCatOf(s));
     });
-    return ['all', ...Array.from(set)];
+    // Same order as Services → Manage classification (the master category list).
+    const master = (offerType === 'pkg'
+      ? (classification.package_categories || [])
+      : (classification.categories || []).map((c) => c.name)).map((n) => String(n).toLowerCase());
+    const rank = (n) => { const i = master.indexOf(String(n).toLowerCase()); return i === -1 ? Infinity : i; };
+    const ordered = Array.from(set).sort((a, b) => (rank(a) - rank(b)) || String(a).localeCompare(String(b)));
+    return ['all', ...ordered];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [services, offerType, gender]);
+  }, [services, offerType, gender, classification]);
 
   /* Variant (tier × length) price resolver — mirrors the service editor. */
   const variantKey = (axes, tIdx, lIdx) => {
@@ -1531,7 +1538,7 @@ export default function AppointmentDrawer({
 
 /* --------- small presentational components --------- */
 function ServiceCard({ s, on, onClick, price, variant, unavailable }) {
-  const col = catOf(s.sub_category || s.category || 'General');
+  const col = catOf(serviceCategoryOf(s));
   const thumb = s.thumbnail_url || s.image_url;
   const shown = price != null ? price : (s.base_price || s.price);
   const onwards = s.price_type === 'onwards';
@@ -1556,7 +1563,7 @@ function ServiceCard({ s, on, onClick, price, variant, unavailable }) {
         </span>
         {unavailable
           ? <span className="svc-tag">Not offered{variant ? ` · ${variant}` : ''}</span>
-          : variant ? <span className="svc-tag">{variant}</span> : ((s.sub_category || s.category) && <span className="svc-tag">{s.sub_category || s.category}</span>)}
+          : variant ? <span className="svc-tag">{variant}</span> : <span className="svc-tag">{serviceCategoryOf(s)}</span>}
       </span>
     </button>
   );

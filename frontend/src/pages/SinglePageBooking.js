@@ -3,6 +3,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { useBookingIntent } from '@/contexts/BookingIntentContext';
 import axios from 'axios';
+import { serviceCategoryOf } from '@/lib/serviceCategory';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from 'sonner';
@@ -23,7 +24,7 @@ const API = `${BACKEND_URL}/api`;
 // belongs to lives in `sub_category` (e.g. "Facial", "Hair Cut") and `category`
 // is the top-level "Services"/"Packages" split. For customer-facing grouping we
 // want the fine-grained bucket, falling back to legacy `category` for un-migrated data.
-const svcBucket = (s) => (s?.sub_category || s?.category || 'General');
+const svcBucket = (s) => serviceCategoryOf(s);
 
 // Helper functions for IST time (Asia/Kolkata) — reliable regardless of browser timezone
 const _istDateFmt = new Intl.DateTimeFormat('en-CA', {
