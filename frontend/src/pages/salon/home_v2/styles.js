@@ -468,7 +468,7 @@ export const HOME_V2_CSS = `
 /* Tab host — hosts non-Home tab pages inside the shell. Neutralises legacy
    fixed backgrounds and full-viewport wrappers so the shell layout owns the
    space between rail (left) and ribbon (right). */
-.shv2 .shv2-tabhost{padding:0;min-height:calc(100vh - 68px);background:var(--bg);position:relative;overflow-x:clip}
+.shv2 .shv2-tabhost{padding:0;min-height:calc(100vh - 69px);background:var(--bg);position:relative;overflow-x:clip}
 .tab-pad-legacy{padding:16px 20px 40px}
 .shv2 .shv2-tabhost > .tab-pad-legacy{padding:16px 20px 40px}
 .shv2 .shv2-tabhost > .tab-pad-legacy > .min-h-screen{background:transparent !important}

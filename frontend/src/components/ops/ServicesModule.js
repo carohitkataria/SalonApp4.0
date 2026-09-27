@@ -37,7 +37,7 @@ function injectCss() {
   if (_cssDone || typeof document === 'undefined') return;
   _cssDone = true;
   const css = `
-.svc2{--p:#6C4FE0;--p6:#5B3FD1;--p05:#F1EEFF;--p1:#E7E2FF;--p2:#D6CBFF;--bg:#F6F6FB;--sf:#fff;--sf2:#FBFBFE;--ink:#23252F;--inks:#3C3F4E;--mut:#7C8092;--mut2:#9A9EAE;--line:#E3E3EC;--lines:#CBD0DE;--ok:#2FA96A;--bad:#E45C86;--badbg:#FCEAF1;--gold:#C9992B;--goldbg:#FBF3DF;font-family:'Inter',system-ui,sans-serif;color:var(--ink);font-size:13px;display:flex;flex-direction:column;height:100%;min-height:0;box-sizing:border-box;padding:14px 4px 30px}
+.svc2{--p:#6C4FE0;--p6:#5B3FD1;--p05:#F1EEFF;--p1:#E7E2FF;--p2:#D6CBFF;--bg:#F6F6FB;--sf:#fff;--sf2:#FBFBFE;--ink:#23252F;--inks:#3C3F4E;--mut:#7C8092;--mut2:#9A9EAE;--line:#E3E3EC;--lines:#CBD0DE;--ok:#2FA96A;--bad:#E45C86;--badbg:#FCEAF1;--gold:#C9992B;--goldbg:#FBF3DF;font-family:'Inter',system-ui,sans-serif;color:var(--ink);font-size:13px;display:flex;flex-direction:column;height:calc(100vh - 69px);height:calc(100dvh - 69px);min-height:420px;box-sizing:border-box;padding:22px 20px 20px}
 .svc2 *{box-sizing:border-box}
 .svc2 button{font-family:inherit;cursor:pointer}
 .svc2 .num{font-variant-numeric:tabular-nums}
@@ -46,7 +46,7 @@ function injectCss() {
 .svc2 .phead .hic{width:34px;height:34px;border-radius:10px;background:var(--p05);color:var(--p);display:grid;place-items:center;flex:none}
 .svc2 .phead .hic svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:2}
 .svc2 .phead .psub{font-size:12.5px;color:var(--mut);font-weight:600;margin-top:2px}
-.svc2 .main{display:grid;grid-template-columns:290px 1fr;min-height:0;flex:1;border:1.5px solid var(--line);border-radius:14px;overflow:hidden;background:var(--sf)}
+.svc2 .svc2-main{display:grid;grid-template-columns:clamp(340px,30%,440px) minmax(0,1fr);min-height:0;flex:1;border:1.5px solid var(--line);border-radius:14px;overflow:hidden;background:var(--sf)}
 .svc2 .listcol{border-right:1.5px solid var(--line);background:var(--sf);display:flex;flex-direction:column;min-height:0}
 .svc2 .typetabs{display:flex;gap:4px;padding:8px 8px 0}
 .svc2 .typetabs button{flex:1;padding:7px;border:1.5px solid var(--line);background:var(--sf2);border-radius:8px 8px 0 0;font-weight:800;font-size:11.5px;color:var(--mut);border-bottom:0}
@@ -57,7 +57,14 @@ function injectCss() {
 .svc2 .tbtn svg{width:15px;height:15px}
 .svc2 .tbtn:hover{border-color:var(--p2);color:var(--p);background:var(--p05)}
 .svc2 .tbtn.pri{background:var(--p);border-color:var(--p);color:#fff}
-.svc2 .listscroll{overflow:auto;flex:1;min-height:0;padding:6px}
+.svc2 .listscroll{overflow:auto;flex:1;min-height:0;padding:6px;overscroll-behavior:contain}
+.svc2 .editcol{overscroll-behavior:contain}
+@media(max-width:820px){
+  .svc2{height:auto;min-height:0;padding:14px 12px 90px}
+  .svc2 .svc2-main{grid-template-columns:1fr;overflow:visible}
+  .svc2 .listcol{max-height:55vh;border-right:0;border-bottom:1.5px solid var(--line)}
+  .svc2 .editcol{overflow:visible}
+}
 .svc2 .selbar{display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:4px;background:var(--p05);border:1.5px solid var(--p2);border-radius:8px;font-size:11.5px;font-weight:700;color:var(--p6)}
 .svc2 .selbar .del{margin-left:auto;color:var(--bad);background:transparent;border:0;font-weight:800;display:inline-flex;align-items:center;gap:4px}
 .svc2 .selbar .del svg{width:13px;height:13px}
@@ -394,7 +401,9 @@ export default function ServicesModule({ salonId, getAuthHeaders }) {
           <div className="psub">Manage your service menu, packages, prices and classifications.</div>
         </div>
       </div>
-      <div className="main">
+      {/* Not "main": that class is the Home v2 shell's scroller (rail/ribbon
+          margins + 100vh) and would leak those styles onto this grid. */}
+      <div className="svc2-main">
         {/* -------- LIST -------- */}
         <div className="listcol">
           <div className="typetabs">
