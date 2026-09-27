@@ -152,6 +152,9 @@ export default function AppointmentDrawer({
   const [membershipDiscPct, setMembershipDiscPct] = useState(0); // auto from membership; editable
   const [tip, setTip] = useState(0);
   const [finalOverride, setFinalOverride] = useState(null);
+  // Invoice settings (GST registration / rate / inclusive / round-off) so the
+  // bill here matches the invoice the backend generates.
+  const [invSettings, setInvSettings] = useState(null);
 
   /* payment — single-select by default (default UPI); "Split payment" toggle
      enables selecting multiple modes to split the bill. */
@@ -245,6 +248,7 @@ export default function AppointmentDrawer({
           }
         }).catch(() => {});
         axios.get(`${API}/salons/${sid}/classification`).then((r) => r.data && setClassification((c) => ({ ...c, ...r.data }))).catch(() => {});
+        axios.get(`${API}/salons/${sid}/invoice-settings`).then((r) => setInvSettings(r.data || null)).catch(() => {});
         setServices(Array.isArray(svcRes.data) ? svcRes.data : (svcRes.data?.services || []));
         setBarbers((Array.isArray(brbRes.data) ? brbRes.data : (brbRes.data?.barbers || [])).filter((b) => b.is_active !== false));
         setCustomers(Array.isArray(custRes.data) ? custRes.data : (custRes.data?.customers || []));
@@ -406,7 +410,23 @@ export default function AppointmentDrawer({
   const membershipDiscAmt = Math.round((subtotal * (Number(membershipDiscPct) || 0)) / 100);
   const totalDiscount = discountAmtPct + membershipDiscAmt + Number(discountAbs || 0) + Number(couponDiscount || 0);
   const membershipPrice = Number(membershipPlan?.price || membershipPlan?.amount || 0);
-  const computedTotal = Math.max(0, subtotal - totalDiscount + Number(tip || 0) + membershipPrice);
+  /* GST — same maths as the invoice (generate_and_send_invoice): tax on the
+     discounted bill (+ membership sold), CGST/SGST split equally, no tax on the
+     tip, then round-off per the invoice settings. */
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const gstOn = !!invSettings?.is_gst_registered && Number(invSettings?.gst_rate) > 0;
+  const gstRate = gstOn ? Number(invSettings.gst_rate) : 0;
+  const gstInclusive = gstOn && !!invSettings?.prices_include_tax;
+  const taxBase = Math.max(0, subtotal - totalDiscount) + membershipPrice;
+  const gstAmt = !gstOn ? 0 : gstInclusive
+    ? r2(taxBase - r2(taxBase / (1 + gstRate / 100)))
+    : r2(taxBase * gstRate / 100);
+  const cgstAmt = r2(gstAmt / 2);
+  const sgstAmt = r2(gstAmt - cgstAmt);
+  const preRound = taxBase + (gstInclusive ? 0 : gstAmt) + Number(tip || 0);
+  const roundOffOn = invSettings ? invSettings.round_off_invoice !== false : false;
+  const computedTotal = roundOffOn ? Math.round(preRound) : r2(preRound);
+  const roundOffAmt = r2(computedTotal - preRound);
   const payable = finalOverride != null ? Number(finalOverride) : computedTotal;
   const totalDurationMin = svcRows.reduce((t, s) => t + Number(s.default_duration || 30), 0);
 
@@ -1447,11 +1467,23 @@ export default function AppointmentDrawer({
                 {membershipPrice > 0 && (
                   <div className="os-t"><div className="n">Membership</div><div className="p">+ {money(membershipPrice)}</div></div>
                 )}
+                {gstOn && !gstInclusive && gstAmt > 0 && (
+                  <>
+                    <div className="os-t" data-testid="apt-cgst"><div className="n">CGST ({gstRate / 2}%)</div><div className="p">+ {money(cgstAmt)}</div></div>
+                    <div className="os-t" data-testid="apt-sgst"><div className="n">SGST ({gstRate / 2}%)</div><div className="p">+ {money(sgstAmt)}</div></div>
+                  </>
+                )}
+                {gstInclusive && gstAmt > 0 && (
+                  <div className="os-t" data-testid="apt-gst-incl"><div className="n" style={{ color: '#7C8092' }}>Includes GST ({gstRate}%)</div><div className="p" style={{ color: '#7C8092' }}>{money(gstAmt)}</div></div>
+                )}
+                {Math.abs(roundOffAmt) >= 0.01 && (
+                  <div className="os-t"><div className="n">Round off</div><div className="p">{roundOffAmt > 0 ? '+' : '−'} {money(Math.abs(roundOffAmt))}</div></div>
+                )}
               </div>
 
               {/* Editable final amount */}
               <div className="os-tot">
-                <div className="lb">Final amount</div>
+                <div className="lb">Final amount{gstOn ? ' (incl. GST)' : ''}</div>
                 <div className="final-edit">
                   <span className="cur">₹</span>
                   <input type="number" min="0" value={payable}
