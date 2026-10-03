@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
+import { fmtIstClock, fmtMinutes } from '@/lib/attendance';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -141,6 +142,10 @@ export default function StaffAttendanceReport({ salonId, getAuthHeaders }) {
     setSelectedBarberIds((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   };
 
+  const hasCheckIn = rows.some((r) => r.mode === 'geo_checkin');
+  const hasService = rows.some((r) => r.mode !== 'geo_checkin');
+  const colCount = 6 + (hasCheckIn ? 3 : 0) + (hasService ? 1 : 0) + (hasCheckIn && hasService ? 1 : 0);
+
   return (
     <div className="space-y-4" data-testid="staff-attendance-report">
       <div className="flex items-end gap-3 flex-wrap">
@@ -203,7 +208,7 @@ export default function StaffAttendanceReport({ salonId, getAuthHeaders }) {
         </div>
       )}
 
-      {/* Table */}
+      {/* Table — columns follow the attendance method of the days shown */}
       <div className="rounded-xl border border-border overflow-x-auto">
         <table className="w-full text-xs">
           <thead className="bg-muted/40 text-muted-foreground">
@@ -213,24 +218,25 @@ export default function StaffAttendanceReport({ salonId, getAuthHeaders }) {
               <th className="text-left px-3 py-2">Staff</th>
               <th className="text-left px-3 py-2">Status</th>
               <th className="text-left px-3 py-2">Leave</th>
-              <th className="text-left px-3 py-2">Check-in</th>
-              <th className="text-left px-3 py-2">Check-out</th>
-              <th className="text-left px-3 py-2">Worked</th>
+              {hasCheckIn && <th className="text-left px-3 py-2">Check-in</th>}
+              {hasCheckIn && <th className="text-left px-3 py-2">Check-out</th>}
+              {hasCheckIn && <th className="text-left px-3 py-2">Worked</th>}
+              {hasService && <th className="text-left px-3 py-2">Services</th>}
               <th className="text-left px-3 py-2">Marked By</th>
-              <th className="text-left px-3 py-2">Mode</th>
+              {hasCheckIn && hasService && <th className="text-left px-3 py-2">Method</th>}
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={10} className="text-center py-8"><Loader2 className="w-5 h-5 animate-spin inline" /></td></tr>
+              <tr><td colSpan={colCount} className="text-center py-8"><Loader2 className="w-5 h-5 animate-spin inline" /></td></tr>
             ) : !rows.length ? (
-              <tr><td colSpan={10} className="text-center py-8 text-muted-foreground">No data in this range.</td></tr>
+              <tr><td colSpan={colCount} className="text-center py-8 text-muted-foreground">No data in this range.</td></tr>
             ) : (
               rows.map((r, i) => (
                 <tr key={`${r.staff_id}-${r.date}-${i}`}
-                    onClick={() => setDrawerRow(r)}
+                    onClick={() => { if (r.mode === 'geo_checkin') setDrawerRow(r); }}
                     data-testid={`rpt-row-${r.staff_id}-${r.date}`}
-                    className="border-t border-border cursor-pointer hover:bg-muted/30">
+                    className={`border-t border-border ${r.mode === 'geo_checkin' ? 'cursor-pointer hover:bg-muted/30' : ''}`}>
                   <td className="px-3 py-2">{r.branch}</td>
                   <td className="px-3 py-2">{r.date}</td>
                   <td className="px-3 py-2">{r.staff_name}</td>
@@ -242,17 +248,24 @@ export default function StaffAttendanceReport({ salonId, getAuthHeaders }) {
                     ) : <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="px-3 py-2">{r.leave_type || '—'}</td>
-                  <td className="px-3 py-2 text-muted-foreground">
-                    {r.check_in ? new Date(r.check_in).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
-                  </td>
-                  <td className="px-3 py-2 text-muted-foreground">
-                    {r.check_out ? new Date(r.check_out).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
-                  </td>
-                  <td className="px-3 py-2">
-                    {r.worked_minutes != null
-                      ? `${Math.floor(r.worked_minutes / 60)}h ${r.worked_minutes % 60}m`
-                      : '—'}
-                  </td>
+                  {hasCheckIn && (
+                    <td className="px-3 py-2 text-muted-foreground">
+                      {r.mode === 'geo_checkin' && r.check_in ? fmtIstClock(r.check_in) : '—'}
+                    </td>
+                  )}
+                  {hasCheckIn && (
+                    <td className="px-3 py-2 text-muted-foreground">
+                      {r.mode === 'geo_checkin' && r.check_out ? fmtIstClock(r.check_out) : '—'}
+                    </td>
+                  )}
+                  {hasCheckIn && (
+                    <td className="px-3 py-2">
+                      {r.mode === 'geo_checkin' && r.worked_minutes != null ? fmtMinutes(r.worked_minutes) : '—'}
+                    </td>
+                  )}
+                  {hasService && (
+                    <td className="px-3 py-2">{r.mode !== 'geo_checkin' ? (r.services_completed || 0) : '—'}</td>
+                  )}
                   <td className="px-3 py-2" title={r.marked_by_name || ''} data-testid={`marked-by-${r.staff_id}-${r.date}`}>
                     {(() => {
                       const lbl = r.marked_by_label || '—';
@@ -266,9 +279,11 @@ export default function StaffAttendanceReport({ salonId, getAuthHeaders }) {
                         : <span className={`px-2 py-0.5 rounded border text-[10px] ${tone}`}>{lbl}</span>;
                     })()}
                   </td>
-                  <td className="px-3 py-2 text-[10px] text-muted-foreground">
-                    {r.mode === 'geo_checkin' ? 'Geo' : r.mode === 'service_completion' ? 'Service' : '—'}
-                  </td>
+                  {hasCheckIn && hasService && (
+                    <td className="px-3 py-2 text-[10px] text-muted-foreground">
+                      {r.mode === 'geo_checkin' ? 'Check-in' : 'Service'}
+                    </td>
+                  )}
                 </tr>
               ))
             )}
@@ -277,8 +292,10 @@ export default function StaffAttendanceReport({ salonId, getAuthHeaders }) {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Each row reflects the attendance mode active on that specific date — so months spanning a switch read correctly.
-        Click any row to see every check-in / check-out for that day.
+        {hasCheckIn && hasService
+          ? 'This range spans a change of attendance method — each day follows the method that was active on it. '
+          : hasCheckIn ? '' : 'Attendance from completed services: present on days with at least one completed service. '}
+        {hasCheckIn && 'Click a check-in day to see every check-in / check-out for that day.'}
       </p>
 
       {/* Phase 8.3 — right-side drawer listing every check-in/out pair for the day */}

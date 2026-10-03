@@ -62,6 +62,7 @@ export default function AttendanceCellDialog({
   leaveRecord,         // active leave record on this date (or null)
   onSaved,             // () => refresh parent
   token,
+  checkInMode = true,  // false → salon uses service completion: no time fields
 }) {
   const [loading, setLoading] = useState(false);
   const [leaveTypes, setLeaveTypes] = useState([]);
@@ -252,7 +253,8 @@ export default function AttendanceCellDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-2">
-          {/* Time inputs */}
+          {/* Time inputs — only when the salon uses check-in / check-out */}
+          {checkInMode && (
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label className="text-xs flex items-center gap-1">
@@ -279,6 +281,7 @@ export default function AttendanceCellDialog({
               />
             </div>
           </div>
+          )}
 
           {/* Status picker */}
           <div className="space-y-2">
@@ -305,8 +308,9 @@ export default function AttendanceCellDialog({
             </div>
             {status === 'auto' && (
               <p className="text-[11px] text-muted-foreground">
-                Status will be derived from the times above using the salon's geo rules
-                (max check-in time & min daily minutes).
+                {checkInMode
+                  ? "Status will be derived from the times above using the salon's check-in rules (late mark & full-day hours)."
+                  : 'Status will follow completed services: present if at least one service was completed that day.'}
               </p>
             )}
           </div>

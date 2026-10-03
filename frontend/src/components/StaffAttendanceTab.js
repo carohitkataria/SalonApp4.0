@@ -12,6 +12,7 @@ import {
 import { motion } from 'framer-motion';
 import LeaveBalanceCard from '@/components/leave/LeaveBalanceCard';
 import AttendanceCellDialog from '@/components/attendance/AttendanceCellDialog';
+import { isCheckInMode } from '@/lib/attendance';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -39,6 +40,7 @@ export default function StaffAttendanceTab({ salonId, barberId, barberName, comp
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   });
   const [attendance, setAttendance] = useState([]);
+  const [attMode, setAttMode] = useState(null);
   const [salary, setSalary] = useState(null);
   const [loading, setLoading] = useState(false);
   const [bulkLoading, setBulkLoading] = useState(false);
@@ -73,6 +75,7 @@ export default function StaffAttendanceTab({ salonId, barberId, barberName, comp
       );
       const barberData = response.data.barbers?.find(b => b.barber_id === barberId);
       setAttendance(barberData?.attendance || []);
+      setAttMode(response.data.attendance_mode);
     } catch (error) {
       console.error('Error fetching attendance:', error);
     } finally {
@@ -711,6 +714,7 @@ export default function StaffAttendanceTab({ salonId, barberId, barberName, comp
         attendanceRecord={attendance.find((a) => a.date === editDialog.dateStr) || null}
         leaveRecord={leaveRecords.find((r) => r.date === editDialog.dateStr && r.status === 'active') || null}
         token={token}
+        checkInMode={isCheckInMode(attMode)}
         onSaved={() => {
           fetchAttendanceData();
           fetchSalaryData();

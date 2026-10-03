@@ -35,6 +35,10 @@ import OrdersDrawer from '@/components/ops/OrdersDrawer';
 import MessagesDrawer from './home_v2/MessagesDrawer';
 import SalonLogoControl from './home_v2/SalonLogoControl';
 import QuickAttendanceDrawer from './home_v2/QuickAttendanceDrawer';
+import {
+  normalizeAttendanceMode, isCheckInMode, fmtIstClock, getBrowserLocation,
+  notifyAttendanceChanged, ATTENDANCE_CHANGED_EVENT,
+} from '@/lib/attendance';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -258,15 +262,37 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
     } finally { setLoading(false); }
   };
   useEffect(() => { fetchKpis(); /* eslint-disable-line */ }, [filter, rangeFrom, rangeTo, salonId]);
+  // Any attendance change elsewhere (ribbon drawer, Staff page, Settings) refreshes the card.
+  useEffect(() => {
+    const onChange = () => fetchKpis();
+    window.addEventListener(ATTENDANCE_CHANGED_EVENT, onChange);
+    return () => window.removeEventListener(ATTENDANCE_CHANGED_EVENT, onChange);
+  }, [filter, rangeFrom, rangeTo, salonId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const P = kpis?.primary || {};
   const secondary = kpis?.secondary || {};
   const cust = kpis?.customer_count || { total: 0, by_source: { online:0, qr:0, owner:0, direct:0 } };
   const staffAtt = kpis?.staff_attendance || [];
-  // Phase 7.2 — the staff status chip reflects the salon's attendance mode.
-  const attMode = salon?.attendance_mode || 'service_completion';
-  const fmtClock = (iso) => { try { return new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } };
-  const isPresent = (a) => a.status === 'in' || a.status === 'out' || a.status === 'present' || !!a.check_in_at;
+  // The staff card follows the salon's attendance method: service completion
+  // shows P / A from completed services; check-in / check-out shows In / Out.
+  const attMode = normalizeAttendanceMode(kpis?.attendance_mode || salon?.attendance_mode);
+  const checkInMode = isCheckInMode(attMode);
+  const isStaffRole = ['salon_staff', 'staff'].includes(salonUser?.role);
+  const attPill = (a) => {
+    if (a.status === 'on_leave') return { cls: 'out', label: 'Leave' };
+    if (a.status === 'holiday') return { cls: 'out', label: 'Holiday' };
+    if (checkInMode) {
+      if (a.is_checked_in) return a.late ? { cls: 'late', label: 'Late' } : { cls: 'in', label: 'In' };
+      if (a.sessions && a.sessions.length) return { cls: 'out', label: 'Out' };
+      return { cls: 'none', label: 'Not in' };
+    }
+    if (a.status === 'present' || a.status === 'half_day') return { cls: 'in', label: 'P' };
+    if (a.status === 'absent') return { cls: 'abs', label: 'A' };
+    return { cls: 'none', label: '—' };
+  };
+  const canActOn = (a) => checkInMode && canToggleAttendance
+    && (canToggleOthers || (ownStaffId && a.barber_id === ownStaffId))
+    && a.status !== 'on_leave' && a.status !== 'holiday';
   const mk = kpis?.marketing_perf || { sent:0, delivered_pct:0, click_pct:0, redeemed:0, revenue:0, campaigns:[], channels:{} };
   const links = kpis?.booking_links || {};
   const targets = kpis?.targets || {};
@@ -347,9 +373,9 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
     }
   };
 
-  // Staff attendance toggle
+  // Staff attendance toggle (check-in / check-out mode only)
   const toggleAttendance = async (row) => {
-    const action = row.status === 'in' ? 'out' : 'in';
+    const action = row.is_checked_in ? 'out' : 'in';
     // Client-side RBAC — mirrors backend enforcement so the UX matches.
     if (!canToggleAttendance) {
       toast.error("You don't have permission to check in/out staff");
@@ -360,11 +386,15 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
       return;
     }
     try {
-      await axios.post(`${API}/salons/${salonId}/home/staff-attendance/toggle`,
-        { barber_id: row.barber_id, action },
+      const body = { barber_id: row.barber_id, action };
+      // Staff checking themselves in share their location for the geo-fence.
+      if (isStaffRole && action === 'in' && row.barber_id === ownStaffId) {
+        try { Object.assign(body, await getBrowserLocation()); } catch (_) { /* server explains if required */ }
+      }
+      await axios.post(`${API}/salons/${salonId}/home/staff-attendance/toggle`, body,
         { headers: getAuthHeaders() },
       );
-      fetchKpis();
+      notifyAttendanceChanged();
       toast.success(`${row.name} checked ${action === 'in' ? 'in' : 'out'}`);
     } catch (e) {
       const detail = e?.response?.data?.detail || 'Attendance update failed';
@@ -595,53 +625,53 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
             {canToggleAttendance && (
             <div className="kpi" style={{ padding: '14px 16px' }}>
               <div className="schead">
-                <div className="lab"><I.users /> Staff Check-in</div>
-                <div className="sum">
-                  {attMode === 'service_completion'
-                    ? `${staffAtt.filter(isPresent).length} present · ${staffAtt.filter(a => !isPresent(a)).length} absent`
-                    : `${staffAtt.filter(a => a.status === 'in').length} in · ${staffAtt.filter(a => a.status === 'late').length} late`}
+                <div className="lab" title={checkInMode ? 'Check-in / Check-out' : 'Service completion'}><I.users /> Attendance</div>
+                <div className="sum" data-testid="home-attendance-summary" style={{ whiteSpace: 'nowrap' }}>
+                  {(() => {
+                    const total = staffAtt.length;
+                    if (!checkInMode) {
+                      return `${staffAtt.filter(a => a.status === 'present' || a.status === 'half_day').length}/${total} present`;
+                    }
+                    const late = staffAtt.filter(a => a.is_checked_in && a.late).length;
+                    return `${staffAtt.filter(a => a.is_checked_in).length}/${total} in${late ? ` · ${late} late` : ''}`;
+                  })()}
                 </div>
               </div>
               <div style={{ overflowY: 'auto', maxHeight: 92 }}>
                 {(() => {
                   const rows = canToggleOthers
-                    ? staffAtt.slice(0, 3)
+                    ? staffAtt
                     : staffAtt.filter(a => a.barber_id === ownStaffId);
                   if (rows.length === 0) {
                     return <div style={{ fontSize: 11, color: '#7C8092' }}>
                       {canToggleOthers ? 'No staff yet' : 'No linked staff profile'}
                     </div>;
                   }
-                  return rows.map(a => (
-                    <div key={a.barber_id} className="sc-row">
-                      <div className="av" style={{ background: '#6C4FE0' }}>{(a.name || 'S').slice(0, 1).toUpperCase()}</div>
-                      <div className="nm" style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
-                        <span>{a.name}</span>
-                        {attMode === 'geo_checkin' && (a.check_in_at || a.check_out_at) && (
-                          <span style={{ fontSize: 10, color: '#8A8F9E', fontWeight: 500 }}>
-                            {a.check_in_at ? `In ${fmtClock(a.check_in_at)}` : ''}
-                            {a.check_out_at ? `${a.check_in_at ? ' · ' : ''}Out ${fmtClock(a.check_out_at)}` : ''}
-                          </span>
+                  return rows.map(a => {
+                    const pill = attPill(a);
+                    const sub = checkInMode
+                      ? [a.check_in_at ? `In ${fmtIstClock(a.check_in_at)}` : '', a.check_out_at ? `Out ${fmtIstClock(a.check_out_at)}` : ''].filter(Boolean).join(' · ')
+                      : (a.services_completed ? `${a.services_completed} service${a.services_completed > 1 ? 's' : ''} done` : '');
+                    return (
+                      <div key={a.barber_id} className="sc-row" data-testid={`home-attendance-row-${a.barber_id}`}>
+                        <div className="av" style={{ background: '#6C4FE0' }}>{(a.name || 'S').slice(0, 1).toUpperCase()}</div>
+                        <div className="nm" style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
+                          <span>{a.name}</span>
+                          {sub && <span style={{ fontSize: 10, color: '#8A8F9E', fontWeight: 500 }}>{sub}</span>}
+                        </div>
+                        <span className={`st ${pill.cls}`} data-testid={`home-attendance-status-${a.barber_id}`}>{pill.label}</span>
+                        {canActOn(a) && (
+                          <button
+                            className={`sc-btn ${a.is_checked_in ? 'out' : ''}`}
+                            onClick={() => toggleAttendance(a)}
+                            data-testid={`home-attendance-toggle-${a.barber_id}`}
+                          >
+                            {a.is_checked_in ? 'Out' : 'In'}
+                          </button>
                         )}
                       </div>
-                      {attMode === 'service_completion' ? (
-                        <span className={`st ${isPresent(a) ? 'in' : 'late'}`} title={isPresent(a) ? 'Present' : 'Absent'}>
-                          {isPresent(a) ? 'P' : 'A'}
-                        </span>
-                      ) : (
-                        <span className={`st ${a.status}`}>{a.status}</span>
-                      )}
-                      {attMode === 'geo_checkin' && (
-                        <button
-                          className={`sc-btn ${a.status === 'in' ? 'out' : ''}`}
-                          onClick={() => toggleAttendance(a)}
-                          data-testid={`home-attendance-toggle-${a.barber_id}`}
-                        >
-                          {a.status === 'in' ? 'Out' : 'In'}
-                        </button>
-                      )}
-                    </div>
-                  ));
+                    );
+                  });
                 })()}
               </div>
             </div>

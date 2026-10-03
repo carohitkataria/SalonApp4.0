@@ -5297,6 +5297,13 @@ async def update_salon(salon_id: str, salon: SalonUpdate, current_user=Depends(g
     # If invoice_start_number is being changed, reset current_invoice_number
     if 'invoice_start_number' in update_data:
         update_data['current_invoice_number'] = update_data['invoice_start_number']
+
+    # Attendance method: store the canonical value, log real switches in the
+    # mode history, and keep the rule fields in step with geo_settings.
+    if update_data.get("attendance_mode") is not None:
+        update_data.update(attendance_mode_mod.mode_change_fields(
+            existing, update_data["attendance_mode"], current_user))
+    update_data.update(attendance_mode_mod.mirror_rule_fields(update_data, existing))
     
     if update_data:
         await db.salons.update_one({"id": salon_id}, {"$set": update_data})
@@ -13651,61 +13658,8 @@ async def complete_token(token_id: str, current_salon=Depends(get_current_salon)
         {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc).isoformat()}}
     )
 
-    # --- Auto-attendance (service_completion mode) ---------------------------
-    # When the salon's attendance mode is "service_completion", marking a token
-    # complete should also mark the barber present for that IST day (unless an
-    # admin override already exists or the month is locked). This is the
-    # behaviour the UI advertises in the "By service completion" radio option.
-    try:
-        barber_id = token.get("barber_id")
-        salon_id_for_attn = token.get("salon_id")
-        if barber_id and salon_id_for_attn:
-            salon_doc = await db.salons.find_one(
-                {"id": salon_id_for_attn},
-                {"_id": 0, "attendance_mode": 1},
-            ) or {}
-            mode_now = salon_doc.get("attendance_mode") or "service_completion"
-            if mode_now == "service_completion":
-                # IST date of the booking (use the booking's own date when set,
-                # else "today" in IST). This matches what calculate_daily_attendance
-                # would compute.
-                ist_today = attendance_mode_mod.current_ist_date()
-                date_str = token.get("date") or ist_today
-                locked = await attendance_mode_mod.is_attendance_locked(
-                    db, salon_id_for_attn, barber_id, date_str
-                )
-                if not locked:
-                    record_id = f"{salon_id_for_attn}_{barber_id}_{date_str}"
-                    existing_override = await db.attendance.find_one({
-                        "id": record_id,
-                        "auto_calculated": False,
-                    }, {"_id": 0})
-                    if not existing_override:
-                        calc = await calculate_barber_attendance_for_date(
-                            salon_id_for_attn, barber_id, date_str
-                        )
-                        now_iso = datetime.now(timezone.utc).isoformat()
-                        await db.attendance.update_one(
-                            {"id": record_id},
-                            {"$set": {
-                                "id": record_id,
-                                "salon_id": salon_id_for_attn,
-                                "barber_id": barber_id,
-                                "date": date_str,
-                                "status": calc["status"],
-                                "auto_calculated": True,
-                                "morning_shift_completed": calc.get("morning_shift_completed", False),
-                                "noon_evening_shift_completed": calc.get("noon_evening_shift_completed", False),
-                                "bookings_count": calc.get("bookings_count", 0),
-                                "computed_under_mode": calc.get("computed_under_mode"),
-                                "updated_at": now_iso,
-                            },
-                             "$setOnInsert": {"created_at": now_iso}},
-                            upsert=True,
-                        )
-    except Exception as auto_attn_err:
-        # Auto-attendance must never block completing the booking. Log + continue.
-        logger.warning(f"Auto-attendance upsert failed for token {token_id}: {auto_attn_err}")
+    # Service-completion attendance: completing a service marks the staff present.
+    await sync_service_attendance(token.get("salon_id"), token.get("barber_id"), token.get("date"))
 
     # After completion the queue advances — ping guests that are now 1 or 2
     # spots away so they can start heading over.
@@ -16390,36 +16344,15 @@ async def get_salon_home_kpis(
     customer_count_by_source = source_map
     customer_count_total = sum(source_map.values())
 
-    # ---- Staff attendance (In / Late / Out for today) -------------------------
-    # attendance_mode.py stores docs in db.staff_attendance
-    #   {barber_id, salon_id, date, check_in_at, check_out_at, status}
+    # ---- Staff attendance for today (same data as every other attendance view) --
     attendance_today: List[Dict[str, Any]] = []
+    attendance_mode_today = attendance_mode_mod.SERVICE_MODE
     try:
-        att_rows = await db.staff_attendance.find(
-            {"salon_id": salon_id, "date": today.isoformat()},
-            {"_id": 0}
-        ).to_list(500)
-        att_by_barber = {a.get("barber_id"): a for a in att_rows}
-        # Build per-barber row from all active barbers so admin can toggle
-        for b in barbers:
-            a = att_by_barber.get(b.get("id")) or {}
-            ci = a.get("check_in_at")
-            co = a.get("check_out_at")
-            if co:
-                status = "out"
-            elif ci:
-                status = "in"
-            else:
-                status = "late"
-            attendance_today.append({
-                "barber_id": b.get("id"),
-                "name": b.get("name") or "Staff",
-                "status": status,
-                "check_in_at": ci,
-                "check_out_at": co,
-            })
-    except Exception:
-        attendance_today = []
+        day = await build_attendance_day_rows(salon_id, attendance_mode_mod.current_ist_date())
+        attendance_today = day["rows"]
+        attendance_mode_today = day["mode"]
+    except Exception as e:
+        logger.warning(f"home-kpis attendance failed for {salon_id}: {e}")
 
     # ---- Marketing performance for the period --------------------------------
     marketing_perf: Dict[str, Any] = {
@@ -16514,6 +16447,7 @@ async def get_salon_home_kpis(
             "by_source": customer_count_by_source,
         },
         "staff_attendance": attendance_today,
+        "attendance_mode": attendance_mode_today,
         "marketing_perf": marketing_perf,
         "booking_links": booking_links,
         "secondary": {
@@ -16620,22 +16554,179 @@ async def send_booking_link(
 
 
 # ---------------------------------------------------------------------------
-# Home-page staff attendance toggle — one-tap Check-in / Check-out per staff.
+# Attendance — one shared view of "who is present today".
+#
+# Every surface (Home card, right-ribbon drawer, Staff → Attendance, Staff
+# Portal, Reports) reads `db.attendance` through these helpers, so a change
+# made on one surface shows up on all the others.
+# ---------------------------------------------------------------------------
+def _assert_salon_scope(user: dict, salon_id: str) -> None:
+    token_salon = user.get("salon_id") or user.get("sub")
+    if token_salon != salon_id:
+        raise HTTPException(status_code=403, detail="Not allowed for this salon")
+
+
+async def _assert_attendance_manager(user: dict, salon_id: str, barber_id: Optional[str] = None) -> None:
+    """Admin, branch manager (for staff in their branches) or staff with
+    staff.attendance may manage attendance records."""
+    _assert_salon_scope(user, salon_id)
+    if not has_module_permission(user, "staff", "attendance"):
+        raise HTTPException(status_code=403, detail="Permission denied: staff.attendance")
+    if barber_id and is_branch_manager(user):
+        b = await db.barbers.find_one({"id": barber_id, "salon_id": salon_id}, {"_id": 0, "branch_id": 1})
+        if not b or b.get("branch_id") not in assigned_branch_ids_for(user):
+            raise HTTPException(status_code=403, detail="Access denied for this branch")
+
+
+def _session_list(doc: dict) -> List[Dict[str, Any]]:
+    sessions = list(doc.get("sessions") or [])
+    if not sessions and doc.get("check_in_at"):
+        sessions = [{"ci": doc.get("check_in_at"), "co": doc.get("check_out_at"),
+                     "ci_method": doc.get("check_in_method"), "co_method": doc.get("check_out_method")}]
+    return sessions
+
+
+async def build_attendance_day_rows(salon_id: str, date_str: str,
+                                    barber_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Live attendance for one IST day, one row per active staff."""
+    salon = await db.salons.find_one({"id": salon_id}, {"_id": 0}) or {}
+    mode = attendance_mode_mod.resolve_mode_for_date(salon, date_str)
+    today = attendance_mode_mod.current_ist_date()
+    is_past = date_str < today
+    rules = attendance_mode_mod.effective_rules(salon)
+
+    bq: Dict[str, Any] = {"salon_id": salon_id, "is_active": True}
+    if barber_ids is not None:
+        bq["id"] = {"$in": barber_ids}
+    barbers = await db.barbers.find(
+        bq, {"_id": 0, "id": 1, "name": 1, "branch_id": 1, "doj": 1,
+             "last_working_date": 1, "leave_dates": 1, "is_barber": 1},
+    ).to_list(1000)
+    ids = [b["id"] for b in barbers]
+
+    docs = await db.attendance.find(
+        {"salon_id": salon_id, "date": date_str, "barber_id": {"$in": ids}}, {"_id": 0}
+    ).to_list(1000)
+    by_barber = {d["barber_id"]: d for d in docs}
+    leave_ids = {
+        lv["barber_id"] for lv in await db.leave_records.find(
+            {"salon_id": salon_id, "date": date_str, "barber_id": {"$in": ids},
+             "status": {"$ne": "cancelled"}}, {"_id": 0, "barber_id": 1},
+        ).to_list(1000)
+    }
+    is_holiday = bool(await db.salon_holidays.find_one(
+        {"salon_id": salon_id, "date": date_str}, {"_id": 0, "date": 1}))
+    completed: Dict[str, int] = {}
+    async for t in db.tokens.find(
+        {"salon_id": salon_id, "date": date_str, "status": "completed", "barber_id": {"$in": ids}},
+        {"_id": 0, "barber_id": 1},
+    ):
+        completed[t["barber_id"]] = completed.get(t["barber_id"], 0) + 1
+
+    rows = []
+    for b in barbers:
+        d = by_barber.get(b["id"]) or {}
+        sessions = _session_list(d)
+        last = sessions[-1] if sessions else None
+        is_in = bool(last and last.get("ci") and not last.get("co"))
+        doj = (b.get("doj") or "").strip()
+        lwd = (b.get("last_working_date") or "").strip()
+        employed = not ((doj and date_str < doj) or (lwd and date_str > lwd))
+        on_leave = b["id"] in leave_ids or date_str in (b.get("leave_dates") or [])
+        manual = bool(d) and d.get("auto_calculated") is False and bool(d.get("status"))
+        total_minutes = d.get("total_minutes")
+        half_day_reason = d.get("half_day_reason")
+        if manual and not sessions:
+            status = d["status"]
+        elif on_leave:
+            status = "on_leave"
+        elif is_holiday and not sessions:
+            status = "holiday"
+        elif not employed:
+            status = ""
+        elif mode == attendance_mode_mod.CHECKIN_MODE:
+            if sessions:
+                c = attendance_mode_mod.compute_mode_b_status(
+                    salon, {**d, "date": date_str}, day_has_passed=is_past, on_leave=False)
+                status = d["status"] if manual else c["status"]
+                total_minutes = c["total_minutes"]
+                half_day_reason = d.get("half_day_reason") if manual else c["half_day_reason"]
+            else:
+                status = "absent" if is_past else ""
+        else:
+            status = d.get("status") if manual else (
+                "present" if completed.get(b["id"], 0) >= 1 else ("absent" if is_past else ""))
+        rows.append({
+            "barber_id": b["id"],
+            "name": b.get("name") or "Staff",
+            "branch_id": b.get("branch_id"),
+            "status": status,
+            "is_checked_in": is_in,
+            "check_in_at": sessions[0].get("ci") if sessions else None,
+            "check_out_at": None if is_in or not last else last.get("co"),
+            "sessions": sessions,
+            "total_minutes": total_minutes,
+            "late": half_day_reason == "late_checkin",
+            "half_day_reason": half_day_reason,
+            "services_completed": completed.get(b["id"], 0),
+            "manual": manual,
+            "marked_by_name": d.get("marked_by_name"),
+        })
+    return {
+        "date": date_str,
+        "mode": mode,
+        "rules": {
+            "allow_self_checkin": rules["allow_self_checkin"],
+            "geofence_required": rules["geofence_required"],
+            "shift_start": rules["shift_start"],
+            "late_after_min": rules["late_after_min"],
+            "full_day_minutes": rules["full_day_minutes"],
+        },
+        "rows": rows,
+    }
+
+
+@api_router.get("/salons/{salon_id}/staff-attendance/day")
+async def get_attendance_day(
+    salon_id: str,
+    date: Optional[str] = None,
+    current_salon=Depends(get_current_salon_user),
+):
+    """Live attendance for one day (defaults to today IST) for every active
+    staff the caller may see.  Staff without staff.view_all only get their
+    own row."""
+    _assert_salon_scope(current_salon, salon_id)
+    date_str = date or attendance_mode_mod.current_ist_date()
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    ids = None
+    if current_salon.get("role") == "salon_staff" and not (
+        has_module_permission(current_salon, "staff", "attendance")
+        and has_module_permission(current_salon, "staff", "view_all")
+    ):
+        own = current_salon.get("staff_id")
+        ids = [own] if own else []
+    elif is_branch_manager(current_salon):
+        ids = [b["id"] for b in await db.barbers.find(
+            {"salon_id": salon_id, "branch_id": {"$in": assigned_branch_ids_for(current_salon)}},
+            {"_id": 0, "id": 1}).to_list(1000)]
+    return await build_attendance_day_rows(salon_id, date_str, ids)
+
+
+# ---------------------------------------------------------------------------
+# Home-page / Staff-portal check-in toggle.
 #   POST /api/salons/{salon_id}/home/staff-attendance/toggle
-#   body = {barber_id: str, action: "in" | "out"}
+#   body = {barber_id, action: "in" | "out", latitude?, longitude?}
 #
-# RBAC:
-#   - Admins / branch_managers  → can toggle any staff (bypasses geo-fence).
-#   - Staff role with `staff.attendance` (module) + `staff.view_all` OR the
-#     legacy `can_view_all_staff` flag → can toggle any staff.
-#   - Staff role without `view_all` → can ONLY toggle their OWN linked staff_id
-#     (self check-in). Trying to toggle a peer returns 403.
-#   - Staff role without any staff-module access at all → 403 for everyone.
-#
-# Multi-session fix: after a full check-in → check-out, the same staff CAN
-# check in again the same day. We now maintain a `sessions[]` array (matching
-# attendance_mode.py) so a fresh "in" appends a new open session instead of
-# short-circuiting on `check_in_at`.
+# Same rules as /staff-attendance/check-in and /check-out (it calls them):
+#   - only when the salon uses Check-in / Check-out (409 otherwise);
+#   - staff may act only for themselves, and only when self check-in is on;
+#     the geo-fence applies to their own check-in when it is required;
+#   - admins, branch managers (own branches) and staff with
+#     staff.attendance + staff.view_all check in on the staff's behalf.
+# Repeating an action is a no-op ("in" when already in, "out" when already out).
 # ---------------------------------------------------------------------------
 @api_router.post("/salons/{salon_id}/home/staff-attendance/toggle")
 async def home_toggle_attendance(
@@ -16649,81 +16740,34 @@ async def home_toggle_attendance(
         raise HTTPException(status_code=400, detail="barber_id required")
     if action not in ("in", "out"):
         raise HTTPException(status_code=400, detail="action must be in|out")
+    lat, lng = (body or {}).get("latitude"), (body or {}).get("longitude")
 
-    # ---- RBAC ----
-    role = current_salon.get("role")
-    is_admin_like = role in ("salon_admin", "admin", "salon", "salon_branch_manager")
-    if not is_admin_like:
-        own_staff_id = current_salon.get("staff_id")
-        is_own = bool(own_staff_id and own_staff_id == barber_id)
-        if not is_own:
-            # Toggling a peer requires the attendance module + view_all.
-            if not has_module_permission(current_salon, "staff", "attendance"):
-                raise HTTPException(status_code=403, detail="Permission denied: staff.attendance")
-            if not has_module_permission(current_salon, "staff", "view_all"):
-                raise HTTPException(status_code=403, detail="You can only check in/out your own attendance.")
-        # else: self check-in/out is always allowed (basic self-service).
-
-    today_iso = datetime.now(timezone.utc).date().isoformat()
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    doc = await db.staff_attendance.find_one(
-        {"salon_id": salon_id, "barber_id": barber_id, "date": today_iso},
-        {"_id": 0}
-    ) or {}
-
-    # Migrate legacy check_in_at / check_out_at (no sessions[]) into sessions[]
-    # so the multi-session logic works uniformly.
-    sessions = list(doc.get("sessions") or [])
-    if not sessions and (doc.get("check_in_at") or doc.get("check_out_at")):
-        sessions = [{
-            "ci": doc.get("check_in_at"),
-            "co": doc.get("check_out_at"),
-            "ci_method": doc.get("check_in_method") or "home_toggle",
-            "co_method": doc.get("check_out_method") or "home_toggle",
-        }]
-
-    last = sessions[-1] if sessions else None
-    has_open = bool(last and last.get("ci") and not last.get("co"))
+    await attendance_mode_mod._precheck_check_action(salon_id, barber_id, current_salon, action)
+    today = attendance_mode_mod.current_ist_date()
+    doc = await db.attendance.find_one({"id": f"{salon_id}_{barber_id}_{today}"}, {"_id": 0}) or {}
+    sessions = _session_list(doc)
+    is_in = bool(sessions and sessions[-1].get("ci") and not sessions[-1].get("co"))
+    if action == "in" and is_in:
+        return {"ok": True, "already_in": True, "status": "in", "check_in_at": sessions[-1].get("ci")}
+    if action == "out" and not is_in:
+        if not sessions:
+            raise HTTPException(status_code=409, detail="Not checked in today")
+        return {"ok": True, "already_out": True, "status": "out", "check_out_at": sessions[-1].get("co")}
 
     if action == "in":
-        if has_open:
-            # Already checked in and not yet out — idempotent no-op.
-            return {"ok": True, "already_in": True, "check_in_at": last.get("ci"), "sessions": sessions}
-        # Append a new open session (allows re-check-in after a check-out today).
-        sessions.append({"ci": now_iso, "co": None, "ci_method": "home_toggle"})
-        await db.staff_attendance.update_one(
-            {"salon_id": salon_id, "barber_id": barber_id, "date": today_iso},
-            {"$set": {
-                "check_in_at": now_iso,   # keep legacy field pointing at latest CI
-                "check_out_at": None,     # clear legacy CO because we're back "in"
-                "status": "in",
-                "sessions": sessions,
-                "salon_id": salon_id, "barber_id": barber_id, "date": today_iso,
-            }},
-            upsert=True,
+        res = await attendance_mode_mod._check_in_impl(
+            salon_id,
+            attendance_mode_mod.CheckInPayload(barber_id=barber_id, latitude=lat, longitude=lng),
+            current_salon,
         )
-        return {"ok": True, "check_in_at": now_iso, "status": "in", "sessions": sessions}
-
-    # action == "out"
-    if not has_open:
-        # No open session — record an "out" without altering sessions[] (defensive).
-        await db.staff_attendance.update_one(
-            {"salon_id": salon_id, "barber_id": barber_id, "date": today_iso},
-            {"$set": {"check_out_at": now_iso, "status": "out",
-                      "salon_id": salon_id, "barber_id": barber_id, "date": today_iso}},
-            upsert=True,
+    else:
+        res = await attendance_mode_mod._check_out_impl(
+            salon_id,
+            attendance_mode_mod.CheckOutPayload(barber_id=barber_id, latitude=lat, longitude=lng),
+            current_salon,
         )
-        return {"ok": True, "check_out_at": now_iso, "status": "out", "sessions": sessions}
-
-    # Close the currently-open session.
-    sessions[-1]["co"] = now_iso
-    sessions[-1]["co_method"] = "home_toggle"
-    await db.staff_attendance.update_one(
-        {"salon_id": salon_id, "barber_id": barber_id, "date": today_iso},
-        {"$set": {"check_out_at": now_iso, "status": "out", "sessions": sessions}},
-    )
-    return {"ok": True, "check_out_at": now_iso, "status": "out", "sessions": sessions}
+    rec = res.get("record") or {}
+    return {"ok": True, "status": action, "record": rec, "sessions": rec.get("sessions") or []}
 
 
 @api_router.get("/salons/{salon_id}/barbers/{barber_id}/attendance/today")
@@ -16732,26 +16776,31 @@ async def get_barber_attendance_today(
     barber_id: str,
     current_salon=Depends(get_current_salon_user),
 ):
-    """Today's attendance status + sessions for one staff member (for the Staff Portal)."""
-    today_iso = datetime.now(timezone.utc).date().isoformat()
-    doc = await db.staff_attendance.find_one(
-        {"salon_id": salon_id, "barber_id": barber_id, "date": today_iso}, {"_id": 0}
-    ) or {}
-    sessions = list(doc.get("sessions") or [])
-    if not sessions and (doc.get("check_in_at") or doc.get("check_out_at")):
-        sessions = [{
-            "ci": doc.get("check_in_at"), "co": doc.get("check_out_at"),
-            "ci_method": doc.get("check_in_method") or "home_toggle",
-            "co_method": doc.get("check_out_method") or "home_toggle",
-        }]
-    last = sessions[-1] if sessions else None
-    is_in = bool(last and last.get("ci") and not last.get("co"))
+    """Today's attendance for one staff member (Staff Portal), plus what the
+    caller is allowed to do with it."""
+    _assert_salon_scope(current_salon, salon_id)
+    relation = await attendance_mode_mod.actor_relation(current_salon, salon_id, barber_id)
+    if relation is None:
+        raise HTTPException(status_code=403, detail="Not allowed to view this staff's attendance")
+    day = await build_attendance_day_rows(salon_id, attendance_mode_mod.current_ist_date(), [barber_id])
+    row = (day["rows"] or [{}])[0]
+    is_checkin_mode = day["mode"] == attendance_mode_mod.CHECKIN_MODE
+    can_check = is_checkin_mode and (relation == "manager" or day["rules"]["allow_self_checkin"])
     return {
-        "date": today_iso,
-        "status": "in" if is_in else ("out" if sessions else "none"),
-        "is_checked_in": is_in,
-        "check_in_at": last.get("ci") if last else None,
-        "sessions": sessions,
+        "date": day["date"],
+        "mode": day["mode"],
+        "status": "in" if row.get("is_checked_in") else ("out" if row.get("sessions") else "none"),
+        "attendance_status": row.get("status") or "",
+        "is_checked_in": bool(row.get("is_checked_in")),
+        "check_in_at": row.get("check_in_at"),
+        "check_out_at": row.get("check_out_at"),
+        "sessions": row.get("sessions") or [],
+        "total_minutes": row.get("total_minutes"),
+        "late": bool(row.get("late")),
+        "services_completed": row.get("services_completed", 0),
+        "can_check_in_out": can_check,
+        "self_checkin_allowed": day["rules"]["allow_self_checkin"],
+        "geofence_required": day["rules"]["geofence_required"] and relation == "self",
     }
 
 
@@ -17347,6 +17396,7 @@ async def create_direct_invoice(
         "completed_at": now_iso,
     }
     await db.tokens.insert_one(token_doc)
+    await sync_service_attendance(salon_id, barber_id, today_str)
 
     # Coupon redemption record
     if coupon_doc:
@@ -19164,6 +19214,50 @@ async def _send_expiry_reminder(m: Dict[str, Any], days_left: int, key: str):
         logger.error(f"whatsapp expiry notification failed: {e}")
 
 
+async def sync_service_attendance(salon_id: Optional[str], barber_id: Optional[str],
+                                  date_str: Optional[str] = None) -> None:
+    """Refresh a staff member's attendance after a service is completed.
+
+    Only applies on days governed by the service-completion mode; admin
+    overrides and salary-locked months are left alone.  Safe to call more
+    than once — the status is recomputed from the completed services.
+    Never raises: attendance must not block completing a booking.
+    """
+    if not (salon_id and barber_id):
+        return
+    try:
+        date_str = date_str or attendance_mode_mod.current_ist_date()
+        salon_doc = await db.salons.find_one({"id": salon_id}, {"_id": 0}) or {}
+        if attendance_mode_mod.resolve_mode_for_date(salon_doc, date_str) != attendance_mode_mod.SERVICE_MODE:
+            return
+        if await attendance_mode_mod.is_attendance_locked(db, salon_id, barber_id, date_str):
+            return
+        record_id = f"{salon_id}_{barber_id}_{date_str}"
+        if await db.attendance.find_one({"id": record_id, "auto_calculated": False}, {"_id": 0, "id": 1}):
+            return
+        calc = await calculate_barber_attendance_for_date(salon_id, barber_id, date_str)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await db.attendance.update_one(
+            {"id": record_id},
+            {"$set": {
+                "id": record_id,
+                "salon_id": salon_id,
+                "barber_id": barber_id,
+                "date": date_str,
+                "status": calc["status"],
+                "auto_calculated": True,
+                "morning_shift_completed": calc.get("morning_shift_completed", False),
+                "noon_evening_shift_completed": calc.get("noon_evening_shift_completed", False),
+                "bookings_count": calc.get("bookings_count", 0),
+                "computed_under_mode": calc.get("computed_under_mode"),
+                "updated_at": now_iso,
+            }, "$setOnInsert": {"created_at": now_iso}},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"Service attendance sync failed for {salon_id}/{barber_id}/{date_str}: {e}")
+
+
 # ============ STAFF ATTENDANCE ENDPOINTS ============
 
 async def calculate_barber_attendance_for_date(salon_id: str, barber_id: str, date_str: str) -> dict:
@@ -19269,9 +19363,20 @@ async def calculate_barber_attendance_for_date(salon_id: str, barber_id: str, da
 async def get_monthly_attendance(
     salon_id: str, 
     month: str,  # YYYY-MM format
-    barber_id: Optional[str] = None
+    barber_id: Optional[str] = None,
+    current_user=Depends(get_current_salon_user),
 ):
-    """Get attendance records for a month. If barber_id specified, returns only that barber's records."""
+    """Get attendance records for a month. If barber_id specified, returns only that barber's records.
+    Staff without staff.attendance + staff.view_all only see their own records."""
+    _assert_salon_scope(current_user, salon_id)
+    if current_user.get("role") == "salon_staff" and not (
+        has_module_permission(current_user, "staff", "attendance")
+        and has_module_permission(current_user, "staff", "view_all")
+    ):
+        own = current_user.get("staff_id")
+        if not own or (barber_id and barber_id != own):
+            raise HTTPException(status_code=403, detail="You can only view your own attendance")
+        barber_id = own
     # Validate month format
     try:
         year, mon = month.split("-")
@@ -19310,7 +19415,7 @@ async def get_monthly_attendance(
 
     # Resolve current mode for the UI to render the right hint.
     salon = await db.salons.find_one({"id": salon_id}, {"_id": 0, "attendance_mode": 1}) or {}
-    current_mode = salon.get("attendance_mode") or "service_completion"
+    current_mode = attendance_mode_mod.normalize_mode(salon.get("attendance_mode"))
 
     # Build response
     response = {
@@ -19345,9 +19450,7 @@ async def calculate_daily_attendance(
     current_user=Depends(get_current_salon_user)
 ):
     """Calculate attendance for all barbers for a specific date based on completed bookings."""
-    # RBAC: staff.attendance
-    if not has_module_permission(current_user, "staff", "attendance"):
-        raise HTTPException(status_code=403, detail="Permission denied: staff.attendance")
+    await _assert_attendance_manager(current_user, salon_id)
     
     # Get all active barbers
     barbers = await db.barbers.find({
@@ -19420,13 +19523,17 @@ async def override_attendance(
     current_user=Depends(get_current_salon_user)
 ):
     """Admin override for attendance. Click on calendar date to change status."""
-    # RBAC: staff.attendance
-    if not has_module_permission(current_user, "staff", "attendance"):
-        raise HTTPException(status_code=403, detail="Permission denied: staff.attendance")
+    await _assert_attendance_manager(current_user, salon_id, barber_id)
     
     # Validate status
     if body.status not in ["present", "half_day", "absent", "holiday", "on_leave"]:
         raise HTTPException(status_code=400, detail="Invalid status. Use: present, half_day, absent, holiday, on_leave")
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    if date > attendance_mode_mod.current_ist_date():
+        raise HTTPException(status_code=400, detail="Can't mark attendance for a future date")
     
     # Fetch barber to validate doj / last_working_date when status implies attending work
     barber = await db.barbers.find_one({"id": barber_id, "salon_id": salon_id}, {"_id": 0})
@@ -19504,8 +19611,7 @@ async def clear_attendance_override(
     Used by the calendar's status cycle:
         present → half_day → absent → holiday → blank (this endpoint).
     """
-    if not has_module_permission(current_user, "staff", "attendance"):
-        raise HTTPException(status_code=403, detail="Permission denied: staff.attendance")
+    await _assert_attendance_manager(current_user, salon_id, barber_id)
 
     # Module 4 — lock-on-paid.
     locked = await attendance_mode_mod.is_attendance_locked(db, salon_id, barber_id, date)
@@ -19543,59 +19649,73 @@ class AttnMarkIn(BaseModel):
 @api_router.post("/salons/{salon_id}/attendance/mark")
 async def mark_attendance(salon_id: str, body: AttnMarkIn,
                           current_user=Depends(get_current_salon_user)):
-    """Section 2 — one-tap quick attendance for a single day.
+    """Quick attendance for a single day (right-ribbon drawer, Staff page).
 
-    Row layout depends on the salon's attendance_mode:
-      • service_completion → each row carries a `status` (present/absent/half_day/
-        holiday/on_leave).
-      • geo_checkin        → each row carries check_in / check_out (HH:MM); an
-        optional status override (absent/holiday/on_leave) is still honoured.
-    Writes to db.attendance so the salary screen (Section 3) reflects it.
+    Rows depend on the attendance mode that governs that date:
+      • service_completion → each row carries a `status`.
+      • geo_checkin        → each row carries check_in / check_out ("HH:MM",
+        IST) which become a real check-in session; a status (absent /
+        holiday / on_leave / half_day) can still be set instead.
+    Only send rows that changed.  Rows that can't be saved are returned in
+    `skipped` with the reason; the rest are saved.
     """
-    if current_user.get("role") not in ["admin", "salon_admin", "salon"]:
-        raise HTTPException(status_code=403, detail="Admin access required")
+    await _assert_attendance_manager(current_user, salon_id)
 
     date = body.date or _today_ist()
     try:
         datetime.strptime(date, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    if date > _today_ist():
+        raise HTTPException(status_code=400, detail="Can't mark attendance for a future date")
 
-    salon = await db.salons.find_one({"id": salon_id}, {"_id": 0, "attendance_mode": 1})
-    mode = (salon or {}).get("attendance_mode") or "service_completion"
+    salon = await db.salons.find_one({"id": salon_id}, {"_id": 0}) or {"id": salon_id}
+    mode = attendance_mode_mod.resolve_mode_for_date(salon, date)
     now = datetime.now(timezone.utc).isoformat()
+    marker = {
+        "override_by": current_user.get("id") or current_user.get("user_id") or current_user.get("sub"),
+        "marked_by_role": current_user.get("role"),
+        "marked_by_name": current_user.get("name") or current_user.get("identifier"),
+    }
 
     count = 0
+    skipped: List[Dict[str, Any]] = []
     for r in body.rows:
-        record_id = f"{salon_id}_{r.barber_id}_{date}"
-        doc = {
-            "id": record_id,
-            "salon_id": salon_id,
-            "barber_id": r.barber_id,
-            "date": date,
-            "marked_by": "salon",
-            "auto_calculated": False,
-            "override_by": current_user.get("id"),
-            "updated_at": now,
-            "attendance_mode": mode,
-        }
-        if mode == "geo_checkin":
-            doc["check_in_at"] = r.check_in
-            doc["check_out_at"] = r.check_out
-            if r.status in VALID_ATTN_STATUS:   # allow A/Holiday/Leave overrides
-                doc["status"] = r.status
-        else:
-            if r.status not in VALID_ATTN_STATUS:
-                continue
-            doc["status"] = r.status
-        await db.attendance.update_one(
-            {"id": record_id},
-            {"$set": doc, "$setOnInsert": {"created_at": now}},
-            upsert=True,
-        )
-        count += 1
+        try:
+            await _assert_attendance_manager(current_user, salon_id, r.barber_id)
+            if await attendance_mode_mod.is_attendance_locked(db, salon_id, r.barber_id, date):
+                raise HTTPException(status_code=423, detail="Salary already paid; attendance is locked")
+            use_times = (mode == attendance_mode_mod.CHECKIN_MODE and r.check_in
+                         and r.status not in ("absent", "holiday", "on_leave"))
+            if use_times:
+                try:
+                    ci_iso = attendance_mode_mod.hhmm_to_ist_iso(date, r.check_in)
+                    co_iso = attendance_mode_mod.hhmm_to_ist_iso(date, r.check_out) if r.check_out else None
+                except Exception:
+                    raise HTTPException(status_code=400, detail="Times must be HH:MM")
+                await attendance_mode_mod.write_manual_times(
+                    salon, r.barber_id, date, ci_iso, co_iso, current_user,
+                    forced_status="half_day" if r.status == "half_day" else None,
+                    half_day_reason="admin" if r.status == "half_day" else None,
+                )
+            else:
+                if r.status not in VALID_ATTN_STATUS:
+                    raise HTTPException(status_code=400, detail="Pick a status")
+                record_id = f"{salon_id}_{r.barber_id}_{date}"
+                await db.attendance.update_one(
+                    {"id": record_id},
+                    {"$set": {
+                        "id": record_id, "salon_id": salon_id, "barber_id": r.barber_id,
+                        "date": date, "status": r.status, "auto_calculated": False,
+                        "computed_under_mode": mode, "updated_at": now, **marker,
+                    }, "$setOnInsert": {"created_at": now, "bookings_count": 0}},
+                    upsert=True,
+                )
+            count += 1
+        except HTTPException as e:
+            skipped.append({"barber_id": r.barber_id, "reason": e.detail})
 
-    return {"ok": True, "date": date, "mode": mode, "count": count}
+    return {"ok": True, "date": date, "mode": mode, "count": count, "skipped": skipped}
 
 
 
@@ -19611,6 +19731,7 @@ async def mark_all_present(
     """
     if current_user.get("role") not in ["admin", "salon_admin", "salon"]:
         raise HTTPException(status_code=403, detail="Admin access required")
+    _assert_salon_scope(current_user, salon_id)
     
     # Basic date format check
     try:
@@ -19697,6 +19818,7 @@ async def toggle_barber_leave_date(
     """
     if current_user.get("role") not in ["admin", "salon_admin", "salon"]:
         raise HTTPException(status_code=403, detail="Admin access required")
+    _assert_salon_scope(current_user, salon_id)
     
     # Basic date validation
     try:
@@ -19779,6 +19901,7 @@ async def get_barber_leave_dates(salon_id: str, barber_id: str, current_user=Dep
     """Return barber's leave_dates list and key employment dates."""
     if current_user.get("role") not in ["admin", "salon_admin", "salon"]:
         raise HTTPException(status_code=403, detail="Admin access required")
+    _assert_salon_scope(current_user, salon_id)
     barber = await db.barbers.find_one({"id": barber_id, "salon_id": salon_id}, {"_id": 0})
     if not barber:
         raise HTTPException(status_code=404, detail="Barber not found")
@@ -19812,6 +19935,9 @@ async def staff_attendance_report(
     """
     if current_user.get("role") not in ("admin", "salon_admin", "salon", "salon_branch_manager"):
         raise HTTPException(status_code=403, detail="Admin / branch manager access required")
+    _assert_salon_scope(current_user, salon_id)
+    if is_branch_manager(current_user):
+        branch_id = enforce_branch_for_manager(current_user, branch_id)
     # Validate date format
     try:
         d_start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -19829,9 +19955,21 @@ async def staff_attendance_report(
         ids_list = [x.strip() for x in barber_ids.split(",") if x.strip()]
         barber_q["id"] = {"$in": ids_list}
     barbers = await db.barbers.find(
-        barber_q, {"_id": 0, "id": 1, "name": 1, "branch_id": 1}
+        barber_q, {"_id": 0, "id": 1, "name": 1, "branch_id": 1, "doj": 1, "last_working_date": 1}
     ).to_list(length=1000)
     barber_by_id = {b["id"]: b for b in barbers}
+    salon_doc = await db.salons.find_one({"id": salon_id}, {"_id": 0}) or {}
+    today_ist = attendance_mode_mod.current_ist_date()
+
+    # Completed services per (staff, day) — the basis of service-completion days.
+    services_by_key: dict = {}
+    async for t in db.tokens.find({
+        "salon_id": salon_id, "status": "completed",
+        "barber_id": {"$in": list(barber_by_id.keys())},
+        "date": {"$gte": start_date, "$lte": end_date},
+    }, {"_id": 0, "barber_id": 1, "date": 1}):
+        k = (t.get("barber_id"), t.get("date"))
+        services_by_key[k] = services_by_key.get(k, 0) + 1
 
     # Branch names cache.
     branch_ids_used = {b.get("branch_id") for b in barbers if b.get("branch_id")}
@@ -19919,9 +20057,24 @@ async def staff_attendance_report(
 
     while cur <= d_end:
         ds = cur.strftime("%Y-%m-%d")
+        day_mode = attendance_mode_mod.resolve_mode_for_date(salon_doc, ds)
         for b in barbers:
             att = by_key.get((b["id"], ds)) or {}
             lv = leave_by_key.get((b["id"], ds))
+            services_done = services_by_key.get((b["id"], ds), 0)
+            doj = (b.get("doj") or "").strip()
+            lwd = (b.get("last_working_date") or "").strip()
+            employed = not ((doj and ds < doj) or (lwd and ds > lwd))
+            if att.get("auto_calculated") is not False and employed:
+                # No admin decision for this day: derive it the same way the
+                # Home card does, from the mode that governed the day.
+                if day_mode == attendance_mode_mod.SERVICE_MODE:
+                    if services_done:
+                        att = {**att, "status": "present", "auto_calculated": True}
+                    elif ds < today_ist and att.get("status") != "holiday":
+                        att = {**att, "status": "absent", "auto_calculated": True}
+                elif not att and ds < today_ist:
+                    att = {"status": "absent", "auto_calculated": True}
             if lv:
                 status_code = "L"
                 leave_label = lv.get("leave_type_code")
@@ -19944,8 +20097,13 @@ async def staff_attendance_report(
             # (admin/salon role override), "Staff" (any other override role), "—" if blank.
             mb_role = (att.get("marked_by_role") or "").lower()
             mb_name = att.get("marked_by_name")
+            first_ci_method = ((att.get("sessions") or [{}])[0] or {}).get("ci_method") or att.get("check_in_method")
             if not att:
                 marked_by_label = "—"
+            elif first_ci_method == "self":
+                marked_by_label = "Staff"        # staff checked themselves in
+            elif first_ci_method in ("admin_on_behalf", "admin_edit"):
+                marked_by_label = "Admin"        # checked in / edited by admin or manager
             elif att.get("auto_calculated") is True:
                 marked_by_label = "Auto"
             elif mb_role in ("admin", "salon_admin", "salon"):
@@ -19973,7 +20131,8 @@ async def staff_attendance_report(
                 "half_day_reason": att.get("half_day_reason"),
                 "override_by": att.get("override_by"),
                 "override_note": att.get("override_note"),
-                "mode": att.get("computed_under_mode"),
+                "mode": att.get("computed_under_mode") or day_mode,
+                "services_completed": services_done,
                 "marked_by_label": marked_by_label,
                 "marked_by_name": mb_name,
             })
@@ -19986,7 +20145,7 @@ async def staff_attendance_report(
         writer = csv.writer(output)
         writer.writerow([
             "Branch", "Date", "Staff ID", "Staff Name", "Status",
-            "Leave Type", "Check-in", "Check-out", "Worked (min)",
+            "Leave Type", "Check-in", "Check-out", "Worked (min)", "Services",
             "Half-day Reason", "Marked By", "Marked By Name", "Override Note", "Mode",
         ])
         for r in rows:
@@ -19994,6 +20153,7 @@ async def staff_attendance_report(
                 r["branch"], r["date"], r["staff_id"], r["staff_name"], r["status"],
                 r["leave_type"] or "", r["check_in"] or "", r["check_out"] or "",
                 r["worked_minutes"] if r["worked_minutes"] is not None else "",
+                r["services_completed"],
                 r["half_day_reason"] or "", r.get("marked_by_label") or "—",
                 r.get("marked_by_name") or "", r["override_note"] or "",
                 r["mode"] or "",
@@ -20861,8 +21021,9 @@ async def add_salon_holiday(
     current_user=Depends(get_current_salon_user)
 ):
     """Add a holiday for the salon."""
-    if current_user.get("role") not in ["admin", "salon_admin"]:
+    if current_user.get("role") not in ["admin", "salon_admin", "salon"]:
         raise HTTPException(status_code=403, detail="Admin access required")
+    _assert_salon_scope(current_user, salon_id)
     
     holiday_id = f"{salon_id}_{date}"
     
@@ -20917,16 +21078,26 @@ async def remove_salon_holiday(
     current_user=Depends(get_current_salon_user)
 ):
     """Remove a holiday."""
-    if current_user.get("role") not in ["admin", "salon_admin"]:
+    if current_user.get("role") not in ["admin", "salon_admin", "salon"]:
         raise HTTPException(status_code=403, detail="Admin access required")
+    _assert_salon_scope(current_user, salon_id)
     
     await db.salon_holidays.delete_one({"id": f"{salon_id}_{date}"})
     
-    # Remove holiday status from attendance records
-    await db.attendance.update_many(
-        {"salon_id": salon_id, "date": date, "status": "holiday"},
-        {"$set": {"status": "absent", "auto_calculated": True, "updated_at": datetime.now(timezone.utc).isoformat()}}
-    )
+    # Holiday days go back to being computed by the salon's attendance mode
+    # (completed services, or check-in / check-out).
+    for rec in await db.attendance.find(
+        {"salon_id": salon_id, "date": date, "status": "holiday"}, {"_id": 0, "id": 1, "barber_id": 1}
+    ).to_list(1000):
+        if await attendance_mode_mod.is_attendance_locked(db, salon_id, rec["barber_id"], date):
+            continue
+        calc = await calculate_barber_attendance_for_date(salon_id, rec["barber_id"], date)
+        await db.attendance.update_one(
+            {"id": rec["id"]},
+            {"$set": {"status": calc["status"], "auto_calculated": True,
+                      "computed_under_mode": calc.get("computed_under_mode"),
+                      "updated_at": datetime.now(timezone.utc).isoformat()}},
+        )
     
     return {"message": "Holiday removed"}
 
@@ -22019,6 +22190,7 @@ fastapi_app.include_router(leave_tracker_mod.leave_tracker_router)
 # Module 4 — Attendance Mode (service_completion / geo_checkin toggle + check-in/out)
 import attendance_mode as attendance_mode_mod  # noqa: E402
 attendance_mode_mod.init_attendance_mode(
+    has_module_permission=has_module_permission,
     db=db,
     get_current_salon_user=get_current_salon_user,
     get_current_salon_admin=get_current_salon_admin,
@@ -22148,10 +22320,57 @@ async def cleanup_legacy_predefined_services():
     await db.system_migrations.insert_one({"_id": "cleanup_predefined_v1", "at": datetime.now(timezone.utc).isoformat()})
 
 
+async def migrate_attendance_store():
+    """One-time, safe-to-repeat clean-up for the unified attendance store.
+
+    1. Salons whose method was saved as "checkinout" (Settings page) get the
+       canonical "geo_checkin" value the engine understands.
+    2. Check-ins recorded by the old Home / Staff-portal toggle in the
+       separate `staff_attendance` collection are copied into `attendance`
+       when that day has no check-in there yet.  Each copied doc is flagged
+       so it is never copied twice.
+    """
+    try:
+        aliases = [a for a in attendance_mode_mod._CHECKIN_ALIASES if a != attendance_mode_mod.CHECKIN_MODE]
+        await db.salons.update_many(
+            {"attendance_mode": {"$in": aliases}},
+            {"$set": {"attendance_mode": attendance_mode_mod.CHECKIN_MODE}},
+        )
+        async for old in db.staff_attendance.find({"migrated_to_attendance": {"$ne": True}}, {"_id": 0}):
+            salon_id, barber_id, date = old.get("salon_id"), old.get("barber_id"), old.get("date")
+            if not (salon_id and barber_id and date):
+                continue
+            sessions = [x for x in _session_list(old) if x.get("ci")]
+            record_id = f"{salon_id}_{barber_id}_{date}"
+            current = await db.attendance.find_one({"id": record_id}, {"_id": 0}) or {}
+            if sessions and not current.get("sessions") and not current.get("check_in_at"):
+                last = sessions[-1]
+                await db.attendance.update_one(
+                    {"id": record_id},
+                    {"$set": {
+                        "id": record_id, "salon_id": salon_id, "barber_id": barber_id, "date": date,
+                        "sessions": sessions,
+                        "check_in_at": sessions[0].get("ci"),
+                        "check_out_at": last.get("co"),
+                        "computed_under_mode": attendance_mode_mod.CHECKIN_MODE,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }, "$setOnInsert": {"auto_calculated": True, "bookings_count": 0,
+                                        "created_at": datetime.now(timezone.utc).isoformat()}},
+                    upsert=True,
+                )
+            await db.staff_attendance.update_one(
+                {"salon_id": salon_id, "barber_id": barber_id, "date": date},
+                {"$set": {"migrated_to_attendance": True}},
+            )
+    except Exception as e:
+        logger.warning(f"migrate_attendance_store failed: {e}")
+
+
 @fastapi_app.on_event("startup")
 async def startup_event():
     await initialize_data()
     await migrate_branches()
+    await migrate_attendance_store()
     # Jul 2026 — ensure minimum viable indexes for the hot query paths.
     # All non-unique + background so a slow build never blocks startup.
     try:
@@ -22172,6 +22391,11 @@ async def startup_event():
             db.attendance.create_index([("salon_id", 1), ("date", -1)], background=True),
             db.attendance.create_index([("salon_id", 1), ("barber_id", 1), ("date", -1)], background=True),
             db.attendance.create_index([("staff_id", 1), ("date", -1)], background=True),
+            db.attendance.create_index("id", background=True),
+            # Attendance day view / report / salary lock checks.
+            db.leave_records.create_index([("salon_id", 1), ("date", 1)], background=True),
+            db.salon_holidays.create_index([("salon_id", 1), ("date", 1)], background=True),
+            db.salary_records.create_index([("salon_id", 1), ("barber_id", 1), ("month", 1)], background=True),
             db.financial_transactions.create_index([("salon_id", 1), ("date", -1)], background=True),
             db.invoices.create_index([("salon_id", 1), ("date", -1)], background=True),
             db.customers.create_index("phone", background=True),
