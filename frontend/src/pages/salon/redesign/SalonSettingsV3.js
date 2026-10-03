@@ -16,6 +16,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { SETTINGS_V3_CSS } from './SettingsV3Styles';
 import EmployeeRewardPlan from '@/components/EmployeeRewardPlan';
 import LeaveConfigTab from '@/components/leave/LeaveConfigTab';
+import { normalizeAttendanceMode, isCheckInMode, CHECKIN_MODE, SERVICE_MODE, notifyAttendanceChanged } from '@/lib/attendance';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -246,7 +247,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
       // Hours
       business_hours: salon.business_hours || hoursDef,
       // Attendance
-      attendance_method: salon.attendance_mode || salon.attendance_method || 'checkinout',
+      attendance_method: normalizeAttendanceMode(salon.attendance_mode || salon.attendance_method),
       shift_start: salon.shift_start || '10:00',
       shift_end: salon.shift_end || '20:00',
       grace_period_min: salon.grace_period_min ?? 15,
@@ -256,7 +257,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
       auto_checkout: salon.auto_checkout ?? true,
       auto_checkout_time: salon.auto_checkout_time || '21:00',
       allow_self_checkin: salon.allow_self_checkin ?? true,
-      geofence_required: salon.geofence_required ?? false,
+      geofence_required: salon.geofence_required ?? true,
       photo_on_checkin: salon.photo_on_checkin ?? false,
       admin_edit_past_attendance: salon.admin_edit_past_attendance ?? true,
       // Leave
@@ -440,6 +441,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
       const updated = res.data || {};
       setSalon?.(updated);
       setInitial((prev) => ({ ...prev, ...(subset ? Object.fromEntries(subset.map((k) => [k, form[k]])) : form) }));
+      if ('attendance_mode' in payload) notifyAttendanceChanged();
       toast.success('Settings saved');
     } catch (err) {
       toast.error(err?.response?.data?.detail || 'Save failed');
@@ -447,6 +449,44 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
       setSaving(false);
     }
   }, [salonId, form, getAuthHeaders, setSalon]);
+
+  // ----- Fields each settings section saves.  Every section sends only its
+  // own fields so an unrelated, incomplete field elsewhere (e.g. a blank PIN
+  // code) can't block the save. -----
+  const SECTION_KEYS = {
+    leave: ['weekly_off', 'paid_leaves_per_year', 'carry_forward_leaves', 'holiday_calendar'],
+    barberPricing: ['allow_barber_price_override', 'category_based_pricing', 'show_barber_price_on_booking'],
+    tax: ['is_gst_registered', 'gstin', 'gst_rate', 'invoice_prefix', 'next_invoice_no',
+      'prices_include_tax', 'round_off_invoice'],
+    format: ['title_mode', 'show_place_of_supply', 'show_sac_column', 'sac_code', 'show_amount_in_words',
+      'show_tip', 'show_points', 'signature_url', 'print_signature', 'signatory_label', 'show_qr', 'qr_type',
+      'qr_caption_title', 'thank_you', 'footer_note', 'disclaimer'],
+    offers: ['show_offers', 'offers_heading', 'max_offers'],
+    booking: ['online_booking_enabled', 'online_booking_paused', 'online_paused_message', 'advance_booking_days',
+      'slot_duration_min', 'buffer_between_appts', 'cancellation_window_hours', 'allow_guest_choose_barber',
+      'require_advance_payment'],
+    queue: ['walkin_queue_enabled', 'max_queue_size', 'average_service_time_min', 'show_live_wait_time',
+      'auto_assign_next_barber'],
+    counter: ['counter_cash', 'counter_upi', 'counter_card', 'counter_wallet', 'counter_pay_later'],
+    notifGuest: ['notif_appointment_reminders_inapp', 'notif_appointment_reminders_wa',
+      'notif_booking_confirmations_inapp', 'notif_booking_confirmations_wa',
+      'notif_invoice_generation_inapp', 'notif_invoice_generation_wa',
+      'notif_review_requests_inapp', 'notif_review_requests_wa',
+      'notif_birthday_wishes_inapp', 'notif_birthday_wishes_wa', 'marketing_optin_required'],
+    notifStaff: ['notif_daily_summary_owner_inapp', 'notif_daily_summary_owner_wa',
+      'notif_late_checkin_alert_inapp', 'notif_late_checkin_alert_wa',
+      'notif_low_stock_alert_inapp', 'notif_low_stock_alert_wa',
+      'notif_new_booking_alert_inapp', 'notif_new_booking_alert_wa'],
+  };
+
+  // ----- Attendance settings keys — saved on their own so an unrelated,
+  // incomplete field (e.g. a blank PIN code) can't block switching method. -----
+  const ATTENDANCE_KEYS = [
+    'attendance_method', 'shift_start', 'shift_end', 'grace_period_min', 'half_day_max_hours',
+    'min_hours_full_day', 'overtime_after_hours', 'auto_checkout', 'auto_checkout_time',
+    'allow_self_checkin', 'geofence_required', 'photo_on_checkin', 'admin_edit_past_attendance',
+    'lunch_start', 'lunch_end',
+  ];
 
   // ----- Invoice settings keys (persisted on the salon doc) -----
   const INVOICE_KEYS = [
@@ -709,8 +749,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
     ),
 
     'staff.method': () => {
-      const ci = form.attendance_method === 'checkinout';
-      const disabledStyle = !ci ? { opacity: 0.55, pointerEvents: 'none' } : {};
+      const ci = isCheckInMode(form.attendance_method);
       return (
       <>
         <SectionHeader title="Attendance method & rules" sub="The single source that drives how the Staff page marks attendance." />
@@ -719,12 +758,12 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
           <p className="bs">The Staff page attendance drawer changes to match this choice.</p>
           <div className="method-pick">
             {[
-              { m: 'checkinout', title: 'Check-in / Check-out', desc: 'Staff clock in and out. Drawer shows time fields per date + A / P / H / Holiday / Leave.',
+              { m: CHECKIN_MODE, title: 'Check-in / Check-out', desc: 'Staff check in and out (from their own login if allowed below). Attendance drawers show in / out times.',
                 ico: <><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></> },
-              { m: 'service_completion', title: 'Service completion', desc: 'Attendance from services completed. Drawer shows A / P / H / Holiday / Leave only.',
+              { m: SERVICE_MODE, title: 'Service completion', desc: 'Present once a staff member completes a service that day. All check-in / check-out controls are hidden.',
                 ico: <><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></> },
             ].map((o) => (
-              <button key={o.m} type="button" className={`method ${form.attendance_method === o.m ? 'on' : ''}`}
+              <button key={o.m} type="button" className={`method ${normalizeAttendanceMode(form.attendance_method) === o.m ? 'on' : ''}`}
                 onClick={() => set({ attendance_method: o.m })} data-testid={`setg-att-method-${o.m}`}>
                 <span className="rd" />
                 <div className="mtop"><div className="mi"><svg viewBox="0 0 24 24">{o.ico}</svg></div><b>{o.title}</b></div>
@@ -736,11 +775,13 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
             {ci
               ? 'Check-in / check-out rules below are active. Changes save on the button at the bottom.'
-              : 'Rules below are disabled because Service completion is selected. Pick Check-in / Check-out to edit them.'}
+              : 'Staff are marked present automatically when they complete a service. Check-in / check-out buttons and rules are hidden across the app.'}
           </div>
         </div>
 
-        <div className="block" style={disabledStyle}>
+        {ci && (
+        <>
+        <div className="block">
           <h4>Shift &amp; timing</h4><p className="bs">Used to auto-flag late arrivals, half-days and overtime.</p>
           <div className="grid3">
             <div className="field"><label>Shift start</label><input type="time" value={form.shift_start || ''} disabled={!ci} onChange={(e) => set({ shift_start: e.target.value })} /></div>
@@ -769,7 +810,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               })()} disabled /></div>
           </div>
         </div>
-        <div className="block" style={disabledStyle}>
+        <div className="block">
           <h4>Automation &amp; control</h4><p className="bs">How check-ins are captured.</p>
           <OptRow label="Auto check-out" hint="Close open sessions at a fixed time" on={!!form.auto_checkout} onChange={() => ci && toggle('auto_checkout')} testid="setg-auto-checkout" />
           {form.auto_checkout && (
@@ -777,12 +818,14 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               <div className="field"><label>Auto check-out time</label><input type="time" value={form.auto_checkout_time || ''} disabled={!ci} onChange={(e) => set({ auto_checkout_time: e.target.value })} /></div>
             </div>
           )}
-          <OptRow label="Allow staff self check-in" hint="Staff can clock in from their own login" on={!!form.allow_self_checkin} onChange={() => ci && toggle('allow_self_checkin')} />
-          <OptRow label="Require geo-fence" hint="Only allow check-in at the salon location" on={!!form.geofence_required} onChange={() => ci && toggle('geofence_required')} />
+          <OptRow label="Allow staff self check-in" hint="Staff can check in / out from their own login. When off, only admins and managers can." on={!!form.allow_self_checkin} onChange={() => ci && toggle('allow_self_checkin')} />
+          <OptRow label="Require geo-fence" hint="Staff self check-in only works at the salon's saved location" on={!!form.geofence_required} onChange={() => ci && toggle('geofence_required')} />
           <OptRow label="Photo on check-in" hint="Capture a selfie when clocking in" on={!!form.photo_on_checkin} onChange={() => ci && toggle('photo_on_checkin')} />
           <OptRow label="Admin can edit past attendance" hint="Owner/manager can backdate records" on={!!form.admin_edit_past_attendance} onChange={() => toggle('admin_edit_past_attendance')} />
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-method-save" />
+        </>
+        )}
+        <SaveRow onClick={() => save(ATTENDANCE_KEYS)} disabled={saving || !dirty} testid="setg-method-save" />
       </>
       );
     },    'staff.leave': () => (
@@ -808,7 +851,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               </select></div>
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-leave-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.leave)} disabled={saving || !dirty} testid="setg-leave-save" />
 
         <div className="block" style={{ marginTop: 18 }}>
           <h4>Leave types</h4>
@@ -866,7 +909,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             <OptRow label="Category-based default pricing" hint="Auto-set price by Junior / Star / Master" on={!!form.category_based_pricing} onChange={() => toggle('category_based_pricing')} />
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-barber-price-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.barberPricing)} disabled={saving || !dirty} testid="setg-barber-price-save" />
       </>
     ),
 
@@ -931,7 +974,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               toast.error('GSTIN is required when GST-registered');
               return;
             }
-            save();
+            save(SECTION_KEYS.tax);
           }}
           disabled={saving || !dirty}
           testid="setg-tax-save"
@@ -1039,7 +1082,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             <div className="field full"><label>Disclaimer</label><textarea value={form.disclaimer || ''} maxLength={300} onChange={(e) => set({ disclaimer: e.target.value })} data-testid="setg-disclaimer" /></div>
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-format-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.format)} disabled={saving || !dirty} testid="setg-format-save" />
       </>
     ),
 
@@ -1078,7 +1121,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             ))}
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-offers-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.offers)} disabled={saving || !dirty} testid="setg-offers-save" />
       </>
     ),
 
@@ -1126,7 +1169,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               </select></div>
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-booking-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.booking)} disabled={saving || !dirty} testid="setg-booking-save" />
       </>
     ),
 
@@ -1144,7 +1187,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               <input type="number" value={form.max_queue_size ?? 15} onChange={(e) => set({ max_queue_size: Number(e.target.value) || 0 })} /></div>
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-queue-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.queue)} disabled={saving || !dirty} testid="setg-queue-save" />
       </>
     ),
 
@@ -1175,7 +1218,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
           <OptRow label="Wallet" hint="Guest prepaid wallet" on={!!form.counter_wallet} onChange={() => toggle('counter_wallet')} />
           <OptRow label="Pay later" hint="Allow unpaid invoices" on={!!form.counter_pay_later} onChange={() => toggle('counter_pay_later')} />
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-counter-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.counter)} disabled={saving || !dirty} testid="setg-counter-save" />
       </>
     ),
 
@@ -1225,7 +1268,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             testid="setg-notif-birthday" />
           <OptRow label="Marketing opt-in required" hint="Only message guests who opted in" on={!!form.marketing_optin_required} onChange={() => toggle('marketing_optin_required')} />
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-notif-guest-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.notifGuest)} disabled={saving || !dirty} testid="setg-notif-guest-save" />
       </>
     ),
 
@@ -1250,7 +1293,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             onToggleInApp={() => toggle('notif_new_booking_alert_inapp')} onToggleWa={() => toggle('notif_new_booking_alert_wa')}
             testid="setg-notif-new-booking" />
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-notif-staff-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.notifStaff)} disabled={saving || !dirty} testid="setg-notif-staff-save" />
       </>
     ),
   };

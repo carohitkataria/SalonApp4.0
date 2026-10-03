@@ -153,6 +153,7 @@ export const HOME_V2_CSS = `
 .shv2 .sc-row .nm{flex:1;font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .shv2 .sc-row .st{font-size:9.5px;font-weight:800;padding:2px 7px;border-radius:20px;text-transform:uppercase;letter-spacing:.2px}
 .shv2 .st.in{background:var(--green-bg);color:var(--green)} .shv2 .st.late{background:var(--amber-bg);color:var(--amber)} .shv2 .st.out{background:var(--line-2);color:var(--muted)}
+.shv2 .st.abs{background:#FCE4EC;color:#C33C5F} .shv2 .st.none{background:var(--line-2);color:var(--muted)}
 .shv2 .sc-btn{font-size:10.5px;font-weight:700;padding:5px 9px;border-radius:8px;border:1px solid var(--line);color:var(--ink-soft);transition:.15s;flex:none}
 .shv2 .sc-btn:hover{border-color:var(--primary);color:var(--primary)}
 .shv2 .sc-btn.out{background:var(--primary-050);color:var(--primary);border-color:var(--primary-100)}

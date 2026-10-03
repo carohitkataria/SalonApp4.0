@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field, field_validator
 _db = None
 _get_current_salon_user = None
 _get_current_salon_admin = None
+_has_module_permission = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -100,6 +101,68 @@ def default_geo_settings() -> dict:
     return DEFAULT_GEO_SETTINGS.copy()
 
 
+SERVICE_MODE = "service_completion"
+CHECKIN_MODE = "geo_checkin"
+# Older UIs saved the check-in method under other names; treat them all as
+# check-in / check-out so a salon never silently falls back to service mode.
+_CHECKIN_ALIASES = {"geo_checkin", "checkinout", "check_in_out", "checkin", "geo"}
+
+
+def normalize_mode(mode: Optional[str]) -> str:
+    """Map any stored attendance-method value to SERVICE_MODE or CHECKIN_MODE."""
+    return CHECKIN_MODE if (mode or "").strip().lower() in _CHECKIN_ALIASES else SERVICE_MODE
+
+
+# Settings → Staff & Attendance stores these rule fields on the salon doc;
+# the older Staff Settings page stores the same rules inside `geo_settings`.
+# Saving either page writes both places (see mirror_rule_fields) so the two
+# pages, the engine and the UI never disagree.
+RULE_FIELD_TO_GEO = {
+    "grace_period_min": "late_mark_threshold_min",
+    "min_hours_full_day": "required_hours_per_day",
+}
+
+
+def mirror_rule_fields(update: dict, salon: dict) -> dict:
+    """Return extra `$set` fields that keep top-level rule fields and
+    `geo_settings` in step after `update` is applied to `salon`."""
+    extra: dict[str, Any] = {}
+    geo = dict(update.get("geo_settings") or salon.get("geo_settings") or DEFAULT_GEO_SETTINGS)
+    geo_changed = False
+    for top_key, geo_key in RULE_FIELD_TO_GEO.items():
+        if update.get(top_key) is not None:
+            geo[geo_key] = update[top_key]
+            geo_changed = True
+        elif "geo_settings" in update and geo.get(geo_key) is not None:
+            extra[top_key] = geo[geo_key]
+    if geo_changed:
+        extra["geo_settings"] = geo
+    return extra
+
+
+def effective_rules(salon: dict) -> dict:
+    """The check-in / check-out rules the engine actually applies."""
+    geo = salon.get("geo_settings") or {}
+
+    def _pick(top_key: str, geo_key: str, default):
+        for v in (salon.get(top_key), geo.get(geo_key)):
+            if v is not None and v != "":
+                return v
+        return default
+
+    return {
+        "shift_start": salon.get("shift_start") or None,
+        "late_after_min": int(_pick("grace_period_min", "late_mark_threshold_min", 15)),
+        "full_day_minutes": int(float(_pick("min_hours_full_day", "required_hours_per_day", 8)) * 60),
+        "radius_m": int(geo.get("check_in_radius_meters") or DEFAULT_GEO_SETTINGS["check_in_radius_meters"]),
+        "allow_self_checkin": salon.get("allow_self_checkin", True) is not False,
+        # Unset → enforced (the original behaviour of the check-in endpoint).
+        "geofence_required": salon.get("geofence_required", True) is not False,
+        "auto_checkout": salon.get("auto_checkout", True) is not False,
+        "auto_checkout_time": salon.get("auto_checkout_time") or "21:00",
+    }
+
+
 def resolve_mode_for_date(salon: dict, date_str: str) -> str:
     """Look up which mode was active on the given date.
 
@@ -110,6 +173,11 @@ def resolve_mode_for_date(salon: dict, date_str: str) -> str:
     exists, we fall back to the current `attendance_mode` (or
     "service_completion" by default — preserves legacy behaviour).
     """
+    # Today (and later) always follows the salon's current setting, even if the
+    # history list is stale (older settings screens changed the mode without
+    # appending a history entry).
+    if date_str >= current_ist_date():
+        return normalize_mode(salon.get("attendance_mode"))
     hist = salon.get("attendance_mode_history") or []
     hist_sorted = sorted(
         [h for h in hist if h.get("effective_from_date")],
@@ -120,8 +188,12 @@ def resolve_mode_for_date(salon: dict, date_str: str) -> str:
         if entry["effective_from_date"] <= date_str:
             active = entry.get("mode")
     if active:
-        return active
-    return salon.get("attendance_mode") or "service_completion"
+        return normalize_mode(active)
+    if hist_sorted:
+        # Before the first recorded switch the salon was on the original
+        # default, service completion.
+        return SERVICE_MODE
+    return normalize_mode(salon.get("attendance_mode"))
 
 
 async def _get_branch_center(salon: dict, barber: dict) -> tuple[Optional[float], Optional[float], Optional[str]]:
@@ -163,22 +235,28 @@ def compute_mode_b_status(salon: dict, attendance_doc: dict, *, day_has_passed: 
         return {"status": "absent", "half_day_reason": None, "total_minutes": 0}
 
     geo = (salon.get("geo_settings") or {})
+    rules = effective_rules(salon)
+    has_new_late_rule = salon.get("grace_period_min") is not None or geo.get("late_mark_threshold_min") is not None
 
     # --- Late-mark cutoff (minutes-into-day in IST) ---
-    # Prefer the new unified config (late_mark_threshold_min after the day's
-    # opening_time).  Fall back to legacy max_check_in_time HH:MM.
-    if geo.get("late_mark_threshold_min") is not None:
-        opening = _opening_time_for_date(salon, attendance_doc.get("date") or "")
-        opening_min = _parse_hhmm_to_minutes(opening)
-        max_in_min = opening_min + int(geo["late_mark_threshold_min"])
+    # Grace minutes after the shift start (Settings → Staff & Attendance) or,
+    # when no shift start is set, after the day's opening_time.  Salons that
+    # only have the legacy max_check_in_time HH:MM keep using it.
+    if has_new_late_rule or rules["shift_start"]:
+        base = rules["shift_start"] or _opening_time_for_date(salon, attendance_doc.get("date") or "")
+        try:
+            base_min = _parse_hhmm_to_minutes(base)
+        except Exception:
+            base_min = _parse_hhmm_to_minutes("09:00")
+        max_in_min = base_min + rules["late_after_min"]
     else:
         max_in_min = _parse_hhmm_to_minutes(
             geo.get("max_check_in_time") or DEFAULT_GEO_SETTINGS["max_check_in_time"]
         )
 
     # --- Minimum daily minutes ---
-    if geo.get("required_hours_per_day") is not None:
-        min_day_minutes = int(float(geo["required_hours_per_day"]) * 60)
+    if salon.get("min_hours_full_day") is not None or geo.get("required_hours_per_day") is not None:
+        min_day_minutes = rules["full_day_minutes"]
     else:
         min_day_minutes = int(geo.get("min_daily_minutes") or DEFAULT_GEO_SETTINGS["min_daily_minutes"])
 
@@ -328,9 +406,14 @@ class AttendanceModeUpdate(BaseModel):
 
 class CheckInPayload(BaseModel):
     barber_id: str
-    latitude: float
-    longitude: float
-    method: Optional[str] = "self"  # "self" | "admin_on_behalf" | "self_override"
+    # Location is only needed for a staff member's own check-in when the
+    # salon requires the geo-fence.
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    # Only honoured for admins / managers ("self" = test the geo-fence as if
+    # the staff were checking in).  Staff always check in as "self"; the
+    # server never lets them claim an on-behalf or override method.
+    method: Optional[str] = None
     self_override_reason: Optional[str] = None
 
 
@@ -338,7 +421,7 @@ class CheckOutPayload(BaseModel):
     barber_id: str
     latitude: Optional[float] = None
     longitude: Optional[float] = None
-    method: Optional[str] = "self"
+    method: Optional[str] = None
 
 
 class CheckEditPayload(BaseModel):
@@ -370,19 +453,36 @@ def _is_branch_manager(user: dict) -> bool:
     return user.get("role") == "salon_branch_manager"
 
 
-async def _user_can_act_for_barber(user: dict, salon_id: str, barber_id: str) -> bool:
-    """Self check-in (staff for their own staff_id) OR admin OR branch manager
-    whose assigned branches include this barber's branch."""
+async def _barber_in_manager_scope(user: dict, salon_id: str, barber_id: str) -> bool:
+    assigned = user.get("assigned_branch_ids") or []
+    barber = await _db.barbers.find_one({"id": barber_id, "salon_id": salon_id}, {"_id": 0, "branch_id": 1})
+    return bool(barber and barber.get("branch_id") in assigned)
+
+
+async def actor_relation(user: dict, salon_id: str, barber_id: str) -> Optional[str]:
+    """How the caller relates to this staff member for attendance actions.
+
+    "manager" — salon admin, a branch manager of the staff's branch, or a
+                staff user granted staff.attendance + staff.view_all.
+    "self"    — the staff member acting on their own record.
+    None      — not allowed.
+    """
     if _is_admin(user):
-        return True
-    if user.get("role") == "salon_staff" and user.get("staff_id") == barber_id:
-        return True
+        return "manager"
     if _is_branch_manager(user):
-        assigned = user.get("assigned_branch_ids") or []
-        barber = await _db.barbers.find_one({"id": barber_id, "salon_id": salon_id}, {"_id": 0, "branch_id": 1})
-        if barber and barber.get("branch_id") in assigned:
-            return True
-    return False
+        return "manager" if await _barber_in_manager_scope(user, salon_id, barber_id) else None
+    if user.get("role") == "salon_staff":
+        if user.get("staff_id") == barber_id:
+            return "self"
+        if (_has_module_permission is not None
+                and _has_module_permission(user, "staff", "attendance")
+                and _has_module_permission(user, "staff", "view_all")):
+            return "manager"
+    return None
+
+
+async def _user_can_act_for_barber(user: dict, salon_id: str, barber_id: str) -> bool:
+    return (await actor_relation(user, salon_id, barber_id)) is not None
 
 
 @attendance_mode_router.put("/api/salons/{salon_id}/attendance-mode")
@@ -395,6 +495,30 @@ async def update_attendance_mode(salon_id: str, payload: AttendanceModeUpdate,
 # --------------- the real handlers (will be re-registered in init) -----------
 
 
+def mode_change_fields(salon: dict, new_mode: str, user: dict, *,
+                       effective_from_date: Optional[str] = None) -> dict:
+    """`$set` fields for switching the salon's attendance mode.
+
+    Always stores the canonical value.  A history entry is appended only when
+    the mode actually changes, so saving the same setting twice is a no-op.
+    """
+    mode = normalize_mode(new_mode)
+    out: dict[str, Any] = {"attendance_mode": mode}
+    if normalize_mode(salon.get("attendance_mode")) == mode and salon.get("attendance_mode") == mode:
+        return out
+    history = list(salon.get("attendance_mode_history") or [])
+    if normalize_mode(salon.get("attendance_mode")) != mode:
+        history.append({
+            "id": str(uuid.uuid4()),
+            "mode": mode,
+            "changed_by": user.get("user_id") or user.get("id") or user.get("sub"),
+            "changed_at": current_ist_iso(),
+            "effective_from_date": effective_from_date or current_ist_date(),
+        })
+        out["attendance_mode_history"] = history
+    return out
+
+
 async def _update_attendance_mode_impl(salon_id: str, payload: AttendanceModeUpdate, user: dict):
     _assert_salon(user, salon_id)
     if not _is_admin(user):
@@ -404,23 +528,8 @@ async def _update_attendance_mode_impl(salon_id: str, payload: AttendanceModeUpd
     if not salon:
         raise HTTPException(status_code=404, detail="Salon not found")
 
-    eff_date = payload.effective_from_date or current_ist_date()
-    now_iso = current_ist_iso()
-    user_id = user.get("user_id") or user.get("id") or user.get("sub")
-
-    history = list(salon.get("attendance_mode_history") or [])
-    history.append({
-        "id": str(uuid.uuid4()),
-        "mode": payload.mode,
-        "changed_by": user_id,
-        "changed_at": now_iso,
-        "effective_from_date": eff_date,
-    })
-
-    update_doc: dict[str, Any] = {
-        "attendance_mode": payload.mode,
-        "attendance_mode_history": history,
-    }
+    update_doc: dict[str, Any] = mode_change_fields(
+        salon, payload.mode, user, effective_from_date=payload.effective_from_date)
 
     # Merge geo_settings (additive — keep prior keys).
     if payload.geo_settings is not None:
@@ -432,6 +541,7 @@ async def _update_attendance_mode_impl(salon_id: str, payload: AttendanceModeUpd
         # First time: seed defaults so the UI has something to render.
         update_doc["geo_settings"] = DEFAULT_GEO_SETTINGS.copy()
 
+    update_doc.update(mirror_rule_fields(update_doc, salon))
     await _db.salons.update_one({"id": salon_id}, {"$set": update_doc})
     fresh = await _db.salons.find_one({"id": salon_id}, {"_id": 0})
     return {
@@ -442,59 +552,105 @@ async def _update_attendance_mode_impl(salon_id: str, payload: AttendanceModeUpd
     }
 
 
-async def _check_in_impl(salon_id: str, payload: CheckInPayload, user: dict):
+async def _precheck_check_action(salon_id: str, barber_id: str, user: dict, verb: str):
+    """Shared guardrails for check-in and check-out.
+
+    Returns (salon, barber, relation, rules, today).  Raises the right HTTP
+    error when the action is not allowed.
+    """
     _assert_salon(user, salon_id)
-    if not await _user_can_act_for_barber(user, salon_id, payload.barber_id):
-        raise HTTPException(status_code=403, detail="Not allowed to check in for this staff")
+    relation = await actor_relation(user, salon_id, barber_id)
+    if relation is None:
+        raise HTTPException(status_code=403, detail=f"Not allowed to check {verb} for this staff")
 
     salon = await _db.salons.find_one({"id": salon_id}, {"_id": 0})
     if not salon:
         raise HTTPException(status_code=404, detail="Salon not found")
 
     today = current_ist_date()
-    locked = await is_attendance_locked(_db, salon_id, payload.barber_id, today)
-    if locked:
-        raise HTTPException(status_code=423, detail=f"Salary for {locked} is already paid; attendance is locked")
+    if resolve_mode_for_date(salon, today) != CHECKIN_MODE:
+        raise HTTPException(
+            status_code=409,
+            detail="Check-in / check-out is off: this salon records attendance by service completion",
+        )
 
-    # Mode B must be active today (else this endpoint is a no-op + 409).
-    mode = resolve_mode_for_date(salon, today)
-    if mode != "geo_checkin":
-        raise HTTPException(status_code=409, detail="Salon is in 'service_completion' mode; check-in not applicable")
+    rules = effective_rules(salon)
+    if relation == "self" and not rules["allow_self_checkin"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Self check-in is turned off for this salon. Ask your manager to check you in.",
+        )
 
-    barber = await _db.barbers.find_one({"id": payload.barber_id, "salon_id": salon_id}, {"_id": 0})
+    barber = await _db.barbers.find_one({"id": barber_id, "salon_id": salon_id}, {"_id": 0})
     if not barber:
         raise HTTPException(status_code=404, detail="Staff not found")
+    if barber.get("is_active") is False:
+        raise HTTPException(status_code=409, detail="This staff member is inactive")
 
-    centre_lat, centre_lng, source = await _get_branch_center(salon, barber)
-    if centre_lat is None:
-        raise HTTPException(status_code=409, detail="Branch has no geo coordinates configured")
+    locked = await is_attendance_locked(_db, salon_id, barber_id, today)
+    if locked:
+        raise HTTPException(status_code=423, detail=f"Salary for {locked} is already paid; attendance is locked")
+    return salon, barber, relation, rules, today
 
-    geo = salon.get("geo_settings") or DEFAULT_GEO_SETTINGS.copy()
-    radius = int(geo.get("check_in_radius_meters") or 50)
-    distance = haversine_meters(payload.latitude, payload.longitude, centre_lat, centre_lng)
 
-    method = payload.method or "self"
-    if distance > radius:
-        # Admin-on-behalf or self_override may bypass.
-        allow_admin = bool(geo.get("allow_admin_override", True))
-        is_override = method in ("admin_on_behalf", "self_override")
-        if not (is_override and (allow_admin or _is_admin(user))):
+def _actor_fields(user: dict, prefix: str) -> dict:
+    return {
+        f"{prefix}_by": user.get("user_id") or user.get("id") or user.get("sub"),
+        f"{prefix}_by_role": user.get("role"),
+    }
+
+
+async def _check_in_impl(salon_id: str, payload: CheckInPayload, user: dict):
+    salon, barber, relation, rules, today = await _precheck_check_action(
+        salon_id, payload.barber_id, user, "in")
+
+    # Staff always check in as themselves.  Managers check in on the staff's
+    # behalf (no geo-fence) unless they explicitly ask for a "self"-style
+    # fenced check-in with coordinates.
+    if relation == "self":
+        method = "self"
+    elif payload.method == "self" and payload.latitude is not None and payload.longitude is not None:
+        method = "self"
+    else:
+        method = "admin_on_behalf"
+
+    distance = None
+    if payload.latitude is not None and payload.longitude is not None:
+        centre_lat, centre_lng, source = await _get_branch_center(salon, barber)
+        if centre_lat is not None:
+            distance = haversine_meters(payload.latitude, payload.longitude, centre_lat, centre_lng)
+    if method == "self" and rules["geofence_required"]:
+        if payload.latitude is None or payload.longitude is None:
+            raise HTTPException(status_code=400, detail="Location is required to check in (geo-fence is on)")
+        centre_lat, centre_lng, source = await _get_branch_center(salon, barber)
+        if centre_lat is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Salon location is not set. Set it in Settings, or turn off 'Require geo-fence'.",
+            )
+        radius = rules["radius_m"]
+        if distance > radius:
             raise HTTPException(
                 status_code=409,
                 detail=f"You are {int(distance)}m from the {source}; geo-fence radius is {radius}m",
             )
 
+    on_leave = bool(await _db.leave_records.find_one({
+        "salon_id": salon_id, "barber_id": payload.barber_id, "date": today,
+        "status": {"$ne": "cancelled"},
+    }, {"_id": 0, "id": 1}))
+    if on_leave or today in (barber.get("leave_dates") or []):
+        raise HTTPException(status_code=409, detail=f"{barber.get('name') or 'Staff'} is on leave today")
+
     now_iso = current_ist_iso()
     record_id = f"{salon_id}_{payload.barber_id}_{today}"
     existing = await _db.attendance.find_one({"id": record_id}, {"_id": 0})
+    if existing and existing.get("status") in ("holiday", "on_leave") and existing.get("auto_calculated") is False:
+        raise HTTPException(status_code=409, detail=f"Today is marked {existing['status'].replace('_', ' ')} for this staff")
 
-    # Multi-session support (#1c): permit check-in again ONLY when the last
-    # session has been checked-out. If a session is currently open, block.
     existing_sessions = list((existing or {}).get("sessions") or [])
     has_open_session = any((s.get("ci") and not s.get("co")) for s in existing_sessions)
-    # Legacy fallback: if only `check_in_at` exists (no sessions yet) and no
-    # `check_out_at`, treat that as an open session too.
-    legacy_open = (
+    legacy_open = bool(
         existing
         and existing.get("check_in_at")
         and not existing.get("check_out_at")
@@ -503,25 +659,19 @@ async def _check_in_impl(salon_id: str, payload: CheckInPayload, user: dict):
     if has_open_session or legacy_open:
         raise HTTPException(status_code=409, detail="Please check out first before checking in again")
 
-    on_leave = bool(await _db.leave_records.find_one({
-        "salon_id": salon_id, "barber_id": payload.barber_id, "date": today,
-        "status": {"$ne": "cancelled"},
-    }, {"_id": 0, "id": 1}))
-
-    # Build a new session entry for THIS check-in.
     new_session = {
         "ci": now_iso,
         "ci_lat": payload.latitude,
         "ci_lng": payload.longitude,
-        "ci_distance_meters": int(distance),
+        "ci_distance_meters": int(distance) if distance is not None else None,
         "ci_method": method,
+        **_actor_fields(user, "ci"),
     }
-    if payload.self_override_reason:
+    if payload.self_override_reason and relation == "manager":
         new_session["ci_override_reason"] = payload.self_override_reason
 
-    # If legacy pair exists without sessions, migrate it into sessions first.
     if existing and existing.get("check_in_at") and not existing_sessions:
-        legacy_session = {
+        existing_sessions.append({
             "ci": existing.get("check_in_at"),
             "co": existing.get("check_out_at"),
             "ci_lat": existing.get("check_in_lat"),
@@ -531,11 +681,9 @@ async def _check_in_impl(salon_id: str, payload: CheckInPayload, user: dict):
             "co_lat": existing.get("check_out_lat"),
             "co_lng": existing.get("check_out_lng"),
             "co_method": existing.get("check_out_method"),
-        }
-        existing_sessions.append(legacy_session)
+        })
     existing_sessions.append(new_session)
 
-    # First-of-day check-in fields stay pinned to the very first ci.
     first_ci_iso = existing.get("check_in_at") if (existing and existing.get("check_in_at")) else now_iso
     first_ci_lat = existing.get("check_in_lat") if (existing and existing.get("check_in_at")) else payload.latitude
     first_ci_lng = existing.get("check_in_lng") if (existing and existing.get("check_in_at")) else payload.longitude
@@ -545,24 +693,22 @@ async def _check_in_impl(salon_id: str, payload: CheckInPayload, user: dict):
         "salon_id": salon_id,
         "barber_id": payload.barber_id,
         "date": today,
-        "check_in_at": first_ci_iso,      # first check-in of the day (for legacy readers)
+        "check_in_at": first_ci_iso,      # first check-in of the day
         "check_in_lat": first_ci_lat,
         "check_in_lng": first_ci_lng,
-        "check_in_distance_meters": (existing.get("check_in_distance_meters") if existing and existing.get("check_in_at") else int(distance)),
+        "check_in_distance_meters": (existing.get("check_in_distance_meters") if existing and existing.get("check_in_at")
+                                     else (int(distance) if distance is not None else None)),
         "check_in_method": (existing.get("check_in_method") if existing and existing.get("check_in_at") else method),
-        # Clear check-out on re-check-in — day is active again.
-        "check_out_at": None,
+        "check_out_at": None,             # day is active again
         "sessions": existing_sessions,
-        "computed_under_mode": "geo_checkin",
+        "computed_under_mode": CHECKIN_MODE,
         "auto_calculated": True,
         "created_at": (existing or {}).get("created_at") or now_iso,
         "updated_at": now_iso,
     }
-
-    # Compute provisional status.
     computed = compute_mode_b_status(
         salon, {**(existing or {}), **doc},
-        day_has_passed=False, on_leave=on_leave,
+        day_has_passed=False, on_leave=False,
     )
     doc.update(computed)
 
@@ -571,32 +717,20 @@ async def _check_in_impl(salon_id: str, payload: CheckInPayload, user: dict):
 
 
 async def _check_out_impl(salon_id: str, payload: CheckOutPayload, user: dict):
-    _assert_salon(user, salon_id)
-    if not await _user_can_act_for_barber(user, salon_id, payload.barber_id):
-        raise HTTPException(status_code=403, detail="Not allowed to check out for this staff")
-
-    salon = await _db.salons.find_one({"id": salon_id}, {"_id": 0})
-    if not salon:
-        raise HTTPException(status_code=404, detail="Salon not found")
-
-    today = current_ist_date()
-    locked = await is_attendance_locked(_db, salon_id, payload.barber_id, today)
-    if locked:
-        raise HTTPException(status_code=423, detail=f"Salary for {locked} is already paid; attendance is locked")
+    salon, barber, relation, rules, today = await _precheck_check_action(
+        salon_id, payload.barber_id, user, "out")
+    method = "self" if relation == "self" else "admin_on_behalf"
 
     record_id = f"{salon_id}_{payload.barber_id}_{today}"
     existing = await _db.attendance.find_one({"id": record_id}, {"_id": 0})
     if not existing or not existing.get("check_in_at"):
         raise HTTPException(status_code=409, detail="No active check-in found for today")
 
-    # Multi-session support (#1c): the "open" session is the LAST one whose
-    # `co` is missing. If no such session exists, already checked out.
     existing_sessions = list((existing or {}).get("sessions") or [])
     open_idx = -1
     for i, s in enumerate(existing_sessions):
         if s.get("ci") and not s.get("co"):
             open_idx = i
-    # Legacy fallback: no sessions array yet but check_in_at set + no check_out_at.
     legacy_open = (
         existing.get("check_in_at")
         and not existing.get("check_out_at")
@@ -606,22 +740,16 @@ async def _check_out_impl(salon_id: str, payload: CheckOutPayload, user: dict):
         raise HTTPException(status_code=409, detail="No active check-in — please check in first")
 
     now_iso = current_ist_iso()
-    on_leave = bool(await _db.leave_records.find_one({
-        "salon_id": salon_id, "barber_id": payload.barber_id, "date": today,
-        "status": {"$ne": "cancelled"},
-    }, {"_id": 0, "id": 1}))
-
-    # Close the open session (either the last open in `sessions`, or migrate
-    # the legacy pair into a first session).
     if open_idx >= 0:
-        existing_sessions[open_idx]["co"] = now_iso
+        sess = existing_sessions[open_idx]
+        sess["co"] = now_iso
         if payload.latitude is not None:
-            existing_sessions[open_idx]["co_lat"] = payload.latitude
+            sess["co_lat"] = payload.latitude
         if payload.longitude is not None:
-            existing_sessions[open_idx]["co_lng"] = payload.longitude
-        existing_sessions[open_idx]["co_method"] = payload.method or "self"
+            sess["co_lng"] = payload.longitude
+        sess["co_method"] = method
+        sess.update(_actor_fields(user, "co"))
     else:
-        # Migrate legacy pair → sessions.
         existing_sessions = [{
             "ci": existing.get("check_in_at"),
             "co": now_iso,
@@ -631,24 +759,20 @@ async def _check_out_impl(salon_id: str, payload: CheckOutPayload, user: dict):
             "ci_method": existing.get("check_in_method"),
             "co_lat": payload.latitude,
             "co_lng": payload.longitude,
-            "co_method": payload.method or "self",
+            "co_method": method,
+            **_actor_fields(user, "co"),
         }]
 
-    merged = {**existing, "check_out_at": now_iso, "sessions": existing_sessions}
-    if payload.latitude is not None and payload.longitude is not None:
-        merged["check_out_lat"] = payload.latitude
-        merged["check_out_lng"] = payload.longitude
-    merged["check_out_method"] = payload.method or "self"
-
-    computed = compute_mode_b_status(salon, merged, day_has_passed=False, on_leave=on_leave)
+    merged = {**existing, "check_out_at": now_iso, "sessions": existing_sessions, "check_out_method": method}
+    computed = compute_mode_b_status(salon, merged, day_has_passed=False, on_leave=False)
     set_doc = {
-        "check_out_at": merged["check_out_at"],
-        "check_out_method": merged["check_out_method"],
+        "check_out_at": now_iso,
+        "check_out_method": method,
         "sessions": existing_sessions,
         "status": computed["status"],
         "half_day_reason": computed["half_day_reason"],
         "total_minutes": computed["total_minutes"],
-        "computed_under_mode": "geo_checkin",
+        "computed_under_mode": CHECKIN_MODE,
         "updated_at": now_iso,
     }
     if payload.latitude is not None:
@@ -660,79 +784,131 @@ async def _check_out_impl(salon_id: str, payload: CheckOutPayload, user: dict):
     return {"ok": True, "record": (await _db.attendance.find_one({"id": record_id}, {"_id": 0}))}
 
 
+def hhmm_to_ist_iso(date_str: str, hhmm: str) -> str:
+    """'2026-10-03' + '09:30' → ISO timestamp at that IST wall-clock time."""
+    h, m = (int(x) for x in hhmm.split(":"))
+    d = datetime.strptime(date_str, "%Y-%m-%d")
+    return datetime(d.year, d.month, d.day, h, m, tzinfo=IST).isoformat()
+
+
+def _parse_iso(v: Optional[str]) -> Optional[datetime]:
+    if not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+async def write_manual_times(salon: dict, barber_id: str, date: str,
+                             check_in_at: Optional[str], check_out_at: Optional[str],
+                             user: dict, *, forced_status: Optional[str] = None,
+                             half_day_reason: Optional[str] = None,
+                             note: Optional[str] = None) -> dict:
+    """Admin-entered check-in / check-out for one staff on one day.
+
+    Replaces the day's sessions with a single admin-edited session so the
+    hours, status, Home card, calendar and report all read the same thing.
+    Caller is responsible for permission, lock and mode checks.
+    """
+    salon_id = salon["id"]
+    ci_dt, co_dt = _parse_iso(check_in_at), _parse_iso(check_out_at)
+    if check_in_at and not ci_dt:
+        raise HTTPException(status_code=400, detail="Invalid check-in time")
+    if check_out_at and not co_dt:
+        raise HTTPException(status_code=400, detail="Invalid check-out time")
+    if co_dt and not ci_dt:
+        raise HTTPException(status_code=400, detail="Check-out needs a check-in time")
+    if ci_dt and co_dt and co_dt <= ci_dt:
+        raise HTTPException(status_code=400, detail="Check-out must be after check-in")
+    now = datetime.now(IST)
+    if ci_dt and ci_dt > now:
+        raise HTTPException(status_code=400, detail="Check-in can't be in the future")
+    if co_dt and co_dt > now:
+        raise HTTPException(status_code=400, detail="Check-out can't be in the future")
+
+    record_id = f"{salon_id}_{barber_id}_{date}"
+    existing = await _db.attendance.find_one({"id": record_id}, {"_id": 0}) or {}
+    now_iso = current_ist_iso()
+    actor = user.get("user_id") or user.get("id") or user.get("sub")
+    sessions = []
+    if check_in_at:
+        sessions = [{"ci": check_in_at, "co": check_out_at, "ci_method": "admin_edit",
+                     "co_method": "admin_edit" if check_out_at else None,
+                     "ci_by": actor, "ci_by_role": user.get("role")}]
+    set_doc: dict[str, Any] = {
+        "id": record_id, "salon_id": salon_id, "barber_id": barber_id, "date": date,
+        "check_in_at": check_in_at or None,
+        "check_out_at": check_out_at or None,
+        "check_in_method": "admin_edit" if check_in_at else None,
+        "check_out_method": "admin_edit" if check_out_at else None,
+        "sessions": sessions,
+        "auto_calculated": False,
+        "override_by": actor,
+        "marked_by_role": user.get("role"),
+        "marked_by_name": user.get("name") or user.get("identifier"),
+        "override_note": note,
+        "computed_under_mode": CHECKIN_MODE,
+        "updated_at": now_iso,
+    }
+    on_leave = bool(await _db.leave_records.find_one({
+        "salon_id": salon_id, "barber_id": barber_id, "date": date,
+        "status": {"$ne": "cancelled"},
+    }, {"_id": 0, "id": 1}))
+    computed = compute_mode_b_status(
+        salon, {**existing, **set_doc},
+        day_has_passed=date < current_ist_date(), on_leave=on_leave,
+    )
+    set_doc.update(computed)
+    if forced_status:
+        set_doc["status"] = forced_status
+        set_doc["half_day_reason"] = half_day_reason
+    await _db.attendance.update_one(
+        {"id": record_id},
+        {"$set": set_doc, "$setOnInsert": {"created_at": now_iso, "bookings_count": 0}},
+        upsert=True,
+    )
+    return await _db.attendance.find_one({"id": record_id}, {"_id": 0})
+
+
 async def _check_edit_impl(salon_id: str, barber_id: str, date: str,
                              payload: CheckEditPayload, user: dict):
     _assert_salon(user, salon_id)
-    if not (_is_admin(user) or (_is_branch_manager(user) and
-                                  await _user_can_act_for_barber(user, salon_id, barber_id))):
+    if await actor_relation(user, salon_id, barber_id) != "manager":
         raise HTTPException(status_code=403, detail="Admin / branch-manager access required")
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    if date > current_ist_date():
+        raise HTTPException(status_code=400, detail="Can't edit attendance for a future date")
 
     salon = await _db.salons.find_one({"id": salon_id}, {"_id": 0})
     if not salon:
         raise HTTPException(status_code=404, detail="Salon not found")
+    if resolve_mode_for_date(salon, date) != CHECKIN_MODE:
+        raise HTTPException(
+            status_code=409,
+            detail="Check-in / check-out times don't apply: this day is recorded by service completion",
+        )
 
     locked = await is_attendance_locked(_db, salon_id, barber_id, date)
     if locked:
         raise HTTPException(status_code=423, detail=f"Salary for {locked} is already paid; attendance is locked")
 
-    record_id = f"{salon_id}_{barber_id}_{date}"
-    existing = await _db.attendance.find_one({"id": record_id}, {"_id": 0}) or {
-        "id": record_id, "salon_id": salon_id, "barber_id": barber_id, "date": date,
-        "bookings_count": 0,
-        "created_at": current_ist_iso(),
-    }
+    if payload.status and payload.status not in ("present", "half_day", "absent", "holiday", "on_leave"):
+        raise HTTPException(status_code=400, detail="Invalid status")
 
-    now_iso = current_ist_iso()
-    set_doc: dict[str, Any] = {
-        "auto_calculated": False,
-        "override_by": user.get("user_id") or user.get("id") or user.get("sub"),
-        "override_note": payload.note,
-        "updated_at": now_iso,
-    }
-    if payload.check_in_at is not None:
-        set_doc["check_in_at"] = payload.check_in_at
-        set_doc["check_in_method"] = "admin_edit"
-    if payload.check_out_at is not None:
-        set_doc["check_out_at"] = payload.check_out_at
-        set_doc["check_out_method"] = "admin_edit"
-
-    merged = {**existing, **set_doc}
-    on_leave = bool(await _db.leave_records.find_one({
-        "salon_id": salon_id, "barber_id": barber_id, "date": date,
-        "status": {"$ne": "cancelled"},
-    }, {"_id": 0, "id": 1}))
-    day_passed = date < current_ist_date()
-
-    # If admin forces a final status, honour it; otherwise recompute under Mode B.
-    if payload.status:
-        if payload.status not in ("present", "half_day", "absent", "holiday", "on_leave"):
-            raise HTTPException(status_code=400, detail="Invalid status")
-        set_doc["status"] = payload.status
-        set_doc["half_day_reason"] = payload.half_day_reason
-        # total_minutes still recomputed if both timestamps present.
-        if merged.get("check_in_at") and merged.get("check_out_at"):
-            try:
-                ci = datetime.fromisoformat(merged["check_in_at"])
-                co = datetime.fromisoformat(merged["check_out_at"])
-                if ci.tzinfo is None:
-                    ci = ci.replace(tzinfo=timezone.utc)
-                if co.tzinfo is None:
-                    co = co.replace(tzinfo=timezone.utc)
-                set_doc["total_minutes"] = max(0, int((co - ci).total_seconds() // 60))
-            except Exception:
-                pass
-    else:
-        computed = compute_mode_b_status(salon, merged, day_has_passed=day_passed, on_leave=on_leave)
-        set_doc.update(computed)
-
-    set_doc["computed_under_mode"] = "geo_checkin"
-
-    await _db.attendance.update_one(
-        {"id": record_id},
-        {"$set": {**existing, **set_doc}},
-        upsert=True,
+    existing = await _db.attendance.find_one({"id": f"{salon_id}_{barber_id}_{date}"}, {"_id": 0}) or {}
+    ci = payload.check_in_at if payload.check_in_at is not None else existing.get("check_in_at")
+    co = payload.check_out_at if payload.check_out_at is not None else existing.get("check_out_at")
+    record = await write_manual_times(
+        salon, barber_id, date, ci or None, co or None, user,
+        forced_status=payload.status, half_day_reason=payload.half_day_reason,
+        note=payload.note,
     )
-    return {"ok": True, "record": (await _db.attendance.find_one({"id": record_id}, {"_id": 0}))}
+    return {"ok": True, "record": record}
 
 
 # ============================================================
@@ -740,55 +916,98 @@ async def _check_edit_impl(salon_id: str, barber_id: str, date: str,
 # ============================================================
 
 async def auto_close_open_checkins_job(db):
-    """At `geo_settings.auto_absent_cutoff_hour` IST (or legacy
-    `geo_settings.auto_close_at`), mark any open check-ins as absent
-    (no check-out logged).  Per spec: 'If check-out is missing and
-    the day has passed, mark Absent.'
+    """Close check-ins that were never checked out.
 
-    Behaviour:
-      • Always closes yesterday's still-open check-ins (safe day-rollover).
-      • Additionally closes today's open check-ins if the current IST hour
-        has crossed `auto_absent_cutoff_hour`.
+    • Auto check-out ON (Settings → Staff & Attendance, the default): the
+      open session is closed at `auto_checkout_time` on that day and the
+      status is recomputed from the hours worked.
+    • Auto check-out OFF: the day is marked Absent once the cutoff hour
+      (`geo_settings.auto_absent_cutoff_hour`, legacy) has passed.
 
-    Cross-module guard: must skip locked months (salary already paid).
+    Always handles yesterday (safe day-rollover) and handles today once the
+    relevant time has passed.  Safe to re-run: closed sessions are skipped.
+    Skips months whose salary is already paid.
     """
-    salons = await db.salons.find({"attendance_mode": "geo_checkin"}, {"_id": 0, "id": 1, "geo_settings": 1}).to_list(length=10_000)
+    salons = await db.salons.find(
+        {"attendance_mode": {"$in": sorted(_CHECKIN_ALIASES)}}, {"_id": 0},
+    ).to_list(length=10_000)
     closed = 0
     now_ist = datetime.now(IST)
+    today_str = now_ist.strftime("%Y-%m-%d")
     for s in salons:
+        rules = effective_rules(s)
         geo = s.get("geo_settings") or {}
-        # Resolve effective cutoff hour: prefer new field, fall back to legacy HH:MM.
-        cutoff_hour = geo.get("auto_absent_cutoff_hour")
-        if cutoff_hour is None:
+        if rules["auto_checkout"]:
             try:
-                cutoff_hour = _parse_hhmm_to_minutes(
-                    geo.get("auto_close_at") or DEFAULT_GEO_SETTINGS["auto_close_at"]
-                ) // 60
+                cutoff_min = _parse_hhmm_to_minutes(rules["auto_checkout_time"])
             except Exception:
-                cutoff_hour = 23
+                cutoff_min = 21 * 60
+        else:
+            cutoff_hour = geo.get("auto_absent_cutoff_hour")
+            if cutoff_hour is None:
+                try:
+                    cutoff_hour = _parse_hhmm_to_minutes(
+                        geo.get("auto_close_at") or DEFAULT_GEO_SETTINGS["auto_close_at"]
+                    ) // 60
+                except Exception:
+                    cutoff_hour = 23
+            cutoff_min = int(cutoff_hour) * 60
 
         dates_to_close = [(now_ist.date() - timedelta(days=1)).strftime("%Y-%m-%d")]
-        if now_ist.hour >= int(cutoff_hour):
-            dates_to_close.append(now_ist.date().strftime("%Y-%m-%d"))
+        if now_ist.hour * 60 + now_ist.minute >= cutoff_min:
+            dates_to_close.append(today_str)
 
         for date_str in dates_to_close:
+            if resolve_mode_for_date(s, date_str) != CHECKIN_MODE:
+                continue
             open_recs = await db.attendance.find({
                 "salon_id": s["id"], "date": date_str,
                 "check_in_at": {"$ne": None}, "check_out_at": None,
             }, {"_id": 0}).to_list(length=10_000)
             for r in open_recs:
-                # Lock-on-paid guard.
-                locked = await is_attendance_locked(db, s["id"], r["barber_id"], date_str)
-                if locked:
+                if await is_attendance_locked(db, s["id"], r["barber_id"], date_str):
                     continue
+                now_iso = datetime.now(IST).isoformat()
+                if not rules["auto_checkout"]:
+                    await db.attendance.update_one(
+                        {"id": r["id"]},
+                        {"$set": {
+                            "status": "absent",
+                            "half_day_reason": None,
+                            "computed_under_mode": CHECKIN_MODE,
+                            "auto_calculated": True,
+                            "updated_at": now_iso,
+                        }},
+                    )
+                    closed += 1
+                    continue
+                sessions = list(r.get("sessions") or [])
+                if not sessions:
+                    sessions = [{"ci": r.get("check_in_at"), "ci_method": r.get("check_in_method")}]
+                cutoff_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                    hour=cutoff_min // 60, minute=cutoff_min % 60, tzinfo=IST)
+                changed = False
+                for sess in sessions:
+                    if sess.get("ci") and not sess.get("co"):
+                        ci_dt = _parse_iso(sess["ci"])
+                        co_dt = max(cutoff_dt, ci_dt) if ci_dt else cutoff_dt
+                        sess["co"] = co_dt.isoformat()
+                        sess["co_method"] = "auto"
+                        changed = True
+                if not changed:
+                    continue
+                merged = {**r, "sessions": sessions, "check_out_at": sessions[-1]["co"]}
+                computed = compute_mode_b_status(
+                    s, merged, day_has_passed=date_str < today_str, on_leave=False)
                 await db.attendance.update_one(
                     {"id": r["id"]},
                     {"$set": {
-                        "status": "absent",
-                        "half_day_reason": None,
-                        "computed_under_mode": "geo_checkin",
-                        "auto_calculated": True,
-                        "updated_at": datetime.now(IST).isoformat(),
+                        "sessions": sessions,
+                        "check_out_at": sessions[-1]["co"],
+                        "check_out_method": "auto",
+                        **computed,
+                        "computed_under_mode": CHECKIN_MODE,
+                        "updated_at": now_iso,
                     }},
                 )
                 closed += 1
@@ -799,10 +1018,12 @@ async def auto_close_open_checkins_job(db):
 # init
 # ============================================================
 
-def init_attendance_mode(*, db, get_current_salon_user, get_current_salon_admin):
+def init_attendance_mode(*, db, get_current_salon_user, get_current_salon_admin,
+                         has_module_permission=None):
     """Wire the router into the main app.  Called from server.py."""
-    global _db, _get_current_salon_user, _get_current_salon_admin
+    global _db, _get_current_salon_user, _get_current_salon_admin, _has_module_permission
     _db = db
+    _has_module_permission = has_module_permission
     _get_current_salon_user = get_current_salon_user
     _get_current_salon_admin = get_current_salon_admin
 
