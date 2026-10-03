@@ -450,6 +450,35 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
     }
   }, [salonId, form, getAuthHeaders, setSalon]);
 
+  // ----- Fields each settings section saves.  Every section sends only its
+  // own fields so an unrelated, incomplete field elsewhere (e.g. a blank PIN
+  // code) can't block the save. -----
+  const SECTION_KEYS = {
+    leave: ['weekly_off', 'paid_leaves_per_year', 'carry_forward_leaves', 'holiday_calendar'],
+    barberPricing: ['allow_barber_price_override', 'category_based_pricing', 'show_barber_price_on_booking'],
+    tax: ['is_gst_registered', 'gstin', 'gst_rate', 'invoice_prefix', 'next_invoice_no',
+      'prices_include_tax', 'round_off_invoice'],
+    format: ['title_mode', 'show_place_of_supply', 'show_sac_column', 'sac_code', 'show_amount_in_words',
+      'show_tip', 'show_points', 'signature_url', 'print_signature', 'signatory_label', 'show_qr', 'qr_type',
+      'qr_caption_title', 'thank_you', 'footer_note', 'disclaimer'],
+    offers: ['show_offers', 'offers_heading', 'max_offers'],
+    booking: ['online_booking_enabled', 'online_booking_paused', 'online_paused_message', 'advance_booking_days',
+      'slot_duration_min', 'buffer_between_appts', 'cancellation_window_hours', 'allow_guest_choose_barber',
+      'require_advance_payment'],
+    queue: ['walkin_queue_enabled', 'max_queue_size', 'average_service_time_min', 'show_live_wait_time',
+      'auto_assign_next_barber'],
+    counter: ['counter_cash', 'counter_upi', 'counter_card', 'counter_wallet', 'counter_pay_later'],
+    notifGuest: ['notif_appointment_reminders_inapp', 'notif_appointment_reminders_wa',
+      'notif_booking_confirmations_inapp', 'notif_booking_confirmations_wa',
+      'notif_invoice_generation_inapp', 'notif_invoice_generation_wa',
+      'notif_review_requests_inapp', 'notif_review_requests_wa',
+      'notif_birthday_wishes_inapp', 'notif_birthday_wishes_wa', 'marketing_optin_required'],
+    notifStaff: ['notif_daily_summary_owner_inapp', 'notif_daily_summary_owner_wa',
+      'notif_late_checkin_alert_inapp', 'notif_late_checkin_alert_wa',
+      'notif_low_stock_alert_inapp', 'notif_low_stock_alert_wa',
+      'notif_new_booking_alert_inapp', 'notif_new_booking_alert_wa'],
+  };
+
   // ----- Attendance settings keys — saved on their own so an unrelated,
   // incomplete field (e.g. a blank PIN code) can't block switching method. -----
   const ATTENDANCE_KEYS = [
@@ -822,7 +851,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               </select></div>
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-leave-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.leave)} disabled={saving || !dirty} testid="setg-leave-save" />
 
         <div className="block" style={{ marginTop: 18 }}>
           <h4>Leave types</h4>
@@ -880,7 +909,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             <OptRow label="Category-based default pricing" hint="Auto-set price by Junior / Star / Master" on={!!form.category_based_pricing} onChange={() => toggle('category_based_pricing')} />
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-barber-price-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.barberPricing)} disabled={saving || !dirty} testid="setg-barber-price-save" />
       </>
     ),
 
@@ -945,7 +974,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               toast.error('GSTIN is required when GST-registered');
               return;
             }
-            save();
+            save(SECTION_KEYS.tax);
           }}
           disabled={saving || !dirty}
           testid="setg-tax-save"
@@ -1053,7 +1082,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             <div className="field full"><label>Disclaimer</label><textarea value={form.disclaimer || ''} maxLength={300} onChange={(e) => set({ disclaimer: e.target.value })} data-testid="setg-disclaimer" /></div>
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-format-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.format)} disabled={saving || !dirty} testid="setg-format-save" />
       </>
     ),
 
@@ -1092,7 +1121,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             ))}
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-offers-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.offers)} disabled={saving || !dirty} testid="setg-offers-save" />
       </>
     ),
 
@@ -1140,7 +1169,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               </select></div>
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-booking-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.booking)} disabled={saving || !dirty} testid="setg-booking-save" />
       </>
     ),
 
@@ -1158,7 +1187,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
               <input type="number" value={form.max_queue_size ?? 15} onChange={(e) => set({ max_queue_size: Number(e.target.value) || 0 })} /></div>
           </div>
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-queue-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.queue)} disabled={saving || !dirty} testid="setg-queue-save" />
       </>
     ),
 
@@ -1189,7 +1218,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
           <OptRow label="Wallet" hint="Guest prepaid wallet" on={!!form.counter_wallet} onChange={() => toggle('counter_wallet')} />
           <OptRow label="Pay later" hint="Allow unpaid invoices" on={!!form.counter_pay_later} onChange={() => toggle('counter_pay_later')} />
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-counter-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.counter)} disabled={saving || !dirty} testid="setg-counter-save" />
       </>
     ),
 
@@ -1239,7 +1268,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             testid="setg-notif-birthday" />
           <OptRow label="Marketing opt-in required" hint="Only message guests who opted in" on={!!form.marketing_optin_required} onChange={() => toggle('marketing_optin_required')} />
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-notif-guest-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.notifGuest)} disabled={saving || !dirty} testid="setg-notif-guest-save" />
       </>
     ),
 
@@ -1264,7 +1293,7 @@ export default function SalonSettingsV3({ salonId, salon, setSalon, getAuthHeade
             onToggleInApp={() => toggle('notif_new_booking_alert_inapp')} onToggleWa={() => toggle('notif_new_booking_alert_wa')}
             testid="setg-notif-new-booking" />
         </div>
-        <SaveRow onClick={() => save()} disabled={saving || !dirty} testid="setg-notif-staff-save" />
+        <SaveRow onClick={() => save(SECTION_KEYS.notifStaff)} disabled={saving || !dirty} testid="setg-notif-staff-save" />
       </>
     ),
   };
