@@ -1083,7 +1083,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     const name = newStaff.name.trim();
     const phone = (newStaff.mobile || '').replace(/\D/g, '');
     if (!name) return toast.error('Enter full name');
-    if (phone.length < 10) return toast.error('Mobile number is required (login ID)');
+    if (phone.length < 10) return toast.error('Enter a valid 10-digit mobile number');
     const mobile = `+91${phone.slice(-10)}`;
     setAddBusy(true);
     try {
@@ -1136,7 +1136,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
         }
       }
 
-      toast.success('Staff added · login ID ' + phone);
+      toast.success('Staff added. Set up their login under Access if they need one.');
       setAddOpen(false);
       setNewStaff(EMPTY_NEW_STAFF);
       setNewDocs({});
@@ -1184,7 +1184,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     if (!selected) return;
     try {
       const payload = { ...profileDraft };
-      // Mobile is also the staff login number — only send it when it changed.
+      // Mobile is a contact number (login is set under Access) — send only when changed.
       const digits = String(payload.mobile || '').replace(/\D/g, '');
       const current = String(selected?.mobile || selected?.phone || '').replace(/\D/g, '').slice(-10);
       if (digits.length !== 10) return toast.error('Enter a valid 10-digit mobile number');
@@ -1431,7 +1431,6 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
                   onChange={(e) => setProfileDraft({ ...profileDraft, mobile: e.target.value.replace(/\D/g, '').slice(0, 10) })}
                   data-testid="staff-mobile-input"
                 />
-                <span className="hint" style={{ fontSize: 11, color: 'var(--muted)' }}>Also the staff member's login number.</span>
               </>
             ) : (s.phone || s.mobile) ? (
               <a
@@ -2268,7 +2267,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
         <div className="dh">
           <div className="tt">
             <div className="ic"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg></div>
-            <div><h3>Add Staff</h3><p>Mobile number becomes the login ID</p></div>
+            <div><h3>Add Staff</h3><p>Login access is set up separately under Access</p></div>
           </div>
           <button className="close" onClick={() => !addBusy && setAddOpen(false)}>
             <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -2292,7 +2291,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
               <input value={newStaff.emergency_contact}
                 onChange={(e) => setNewStaff({ ...newStaff, emergency_contact: e.target.value })} placeholder="+91…" /></div>
             <div className="field span3">
-              <span className="idnote"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>Mobile number is the unique login ID for this staff.</span>
+              <span className="idnote"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>Contact number. Staff log in with the login ID you set under Access, not this number.</span>
             </div>
           </div>
 

@@ -57,8 +57,11 @@ async def api(server):
         yield client
 
 
+ADMIN_PW = "owner-pass-1"
+
+
 @pytest.mark.asyncio
-async def test_admin_can_change_mobile_and_login_follows(api, server):
+async def test_mobile_edit_is_contact_only(api, server):
     admin = _h(server, role="salon_admin", salon_id=SALON, sub=SALON)
     r = await api.put("/api/barbers/b1", headers=admin,
                       json={"mobile": "98765 43210", "emergency_contact": "+919111111111"})
@@ -66,24 +69,9 @@ async def test_admin_can_change_mobile_and_login_follows(api, server):
     assert r.json()["mobile"] == "+919876543210"
     assert r.json()["emergency_contact"] == "+919111111111"
     user = await server.db.salon_users.find_one({"id": "u1"})
-    assert user["mobile"] == "+919876543210"   # staff can log in with the new number
-    assert user["login_id"] == "asha.k"         # custom login ID untouched
-
-
-@pytest.mark.asyncio
-async def test_mobile_must_be_valid_and_unique(api, server):
-    admin = _h(server, role="salon_admin", salon_id=SALON, sub=SALON)
+    assert user["mobile"] == "+919000000001" and user["login_id"] == "asha.k"  # login untouched
     r = await api.put("/api/barbers/b1", headers=admin, json={"mobile": "12345"})
     assert r.status_code == 400
-    r = await api.put("/api/barbers/b1", headers=admin, json={"mobile": "9000000002"})
-    assert r.status_code == 409 and "Another staff" in r.json()["detail"]
-    await server.db.salon_users.insert_one({"id": "u9", "salon_id": OTHER, "mobile": "+919000000099",
-                                            "login_id": "x.y", "status": "active"})
-    r = await api.put("/api/barbers/b1", headers=admin, json={"mobile": "9000000099"})
-    assert r.status_code == 409 and "another login" in r.json()["detail"]
-    # Saving the unchanged number is fine.
-    r = await api.put("/api/barbers/b1", headers=admin, json={"mobile": "+919000000001", "name": "Asha K"})
-    assert r.status_code == 200 and r.json()["name"] == "Asha K"
 
 
 @pytest.mark.asyncio
@@ -92,3 +80,46 @@ async def test_other_salon_cannot_edit_staff(api, server):
     r = await api.put("/api/barbers/b1", headers=other, json={"mobile": "9876500000"})
     assert r.status_code == 403
     assert (await server.db.barbers.find_one({"id": "b1"}))["mobile"] == "+919000000001"
+
+
+@pytest.mark.asyncio
+async def test_access_login_id_is_the_only_staff_login(api, server):
+    admin = _h(server, role="salon_admin", salon_id=SALON, sub=SALON)
+    # Ravi has no access yet: creating it needs a login ID.
+    r = await api.put(f"/api/salons/{SALON}/barbers/b2/credentials", headers=admin,
+                      json={"password": "ravi-pass-1"})
+    assert r.status_code == 400
+    r = await api.put(f"/api/salons/{SALON}/barbers/b2/credentials", headers=admin,
+                      json={"login_id": "ravi.stylist", "password": "ravi-pass-1"})
+    assert r.status_code == 200, r.text
+    acct = await server.db.salon_users.find_one({"staff_id": "b2"})
+    assert acct["login_id"] == "ravi.stylist" and acct["role"] == "staff"
+
+    login = lambda ident, pw: api.post("/api/salon/users/login", json={"identifier": ident, "password": pw})
+    ok = await login("Ravi.Stylist", "ravi-pass-1")               # login ID, any case
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["staff_id"] == "b2"
+    assert (await login("9000000002", "ravi-pass-1")).status_code == 404   # staff mobile is not a login
+    assert (await login("ravi.stylist", "wrong-pass")).status_code == 401
+
+    # Login IDs are unique platform-wide.
+    r = await api.put(f"/api/salons/{SALON}/barbers/b1/credentials", headers=admin,
+                      json={"login_id": "RAVI.stylist"})
+    assert r.status_code == 409
+
+    # Deactivated staff can no longer sign in.
+    await api.put("/api/barbers/b2", headers=admin, json={"is_active": False})
+    r = await login("ravi.stylist", "ravi-pass-1")
+    assert r.status_code == 403 and "inactive" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_owner_still_signs_in_with_salon_mobile(api, server):
+    await server.db.salon_users.insert_one({
+        "id": "owner", "salon_id": SALON, "login_id": "admin", "mobile": "+919999900000",
+        "role": "admin", "status": "active", "name": "Owner",
+        "password_hash": server.pwd_context.hash(ADMIN_PW), "permissions": {},
+    })
+    r = await api.post("/api/salon/users/login", json={"identifier": "9999900000", "password": ADMIN_PW})
+    assert r.status_code == 200, r.text
+    assert r.json()["role"] == "admin"

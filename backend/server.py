@@ -7276,41 +7276,17 @@ async def update_barber(barber_id: str, barber_update: BarberUpdate, current_use
     _assert_salon_scope(current_user, existing.get("salon_id"))
     
     update_data = {k: v for k, v in barber_update.model_dump().items() if v is not None}
-    linked_account = None
     if "mobile" in update_data:
-        # The mobile number is also the staff member's login number, so it
-        # must be valid and unique, and their login account moves with it.
+        # Contact number only — staff log in with the login ID set under
+        # Staff → Access, never with their mobile.
         digits = re.sub(r"\D", "", update_data["mobile"] or "")
         if len(digits) == 12 and digits.startswith("91"):
             digits = digits[2:]
         if len(digits) != 10:
             raise HTTPException(status_code=400, detail="Enter a valid 10-digit mobile number")
-        mobile = f"+91{digits}"
-        update_data["mobile"] = mobile
-        if mobile != existing.get("mobile"):
-            variants = [mobile, digits, f"91{digits}"]
-            if await db.barbers.find_one(
-                {"salon_id": existing.get("salon_id"), "id": {"$ne": barber_id},
-                 "mobile": {"$in": variants}, "is_active": {"$ne": False}},
-                {"_id": 0, "id": 1},
-            ):
-                raise HTTPException(status_code=409, detail="Another staff member already uses this mobile number")
-            linked_account = await db.salon_users.find_one(
-                {"staff_id": barber_id, "salon_id": existing.get("salon_id")}, {"_id": 0, "id": 1})
-            clash = await db.salon_users.find_one(
-                {"mobile": {"$in": variants},
-                 **({"id": {"$ne": linked_account["id"]}} if linked_account else {})},
-                {"_id": 0, "id": 1},
-            )
-            if clash:
-                raise HTTPException(status_code=409, detail="This mobile number is already used for another login")
+        update_data["mobile"] = f"+91{digits}"
     if update_data:
         await db.barbers.update_one({"id": barber_id}, {"$set": update_data})
-    if linked_account:
-        await db.salon_users.update_one(
-            {"id": linked_account["id"]},
-            {"$set": {"mobile": update_data["mobile"], "updated_at": datetime.now(timezone.utc).isoformat()}},
-        )
     
     updated = await db.barbers.find_one({"id": barber_id}, {"_id": 0})
     # Normalize before returning to ensure Pydantic validation passes
@@ -7914,11 +7890,13 @@ async def salon_user_login(credentials: SalonUserLogin):
         if not identifier.startswith("+91"):
             identifier = f"+91{identifier}"
     
-    # Find user by login_id or mobile
+    # Staff sign in with the login ID set under Staff → Access (case-insensitive,
+    # like its uniqueness check). A mobile number only signs in the salon
+    # owner's admin account — a staff member's mobile is contact info, not a login.
     query = {
         "$or": [
-            {"login_id": credentials.identifier.strip()},
-            {"mobile": identifier}
+            {"login_id": {"$regex": f"^{re.escape(credentials.identifier.strip())}$", "$options": "i"}},
+            {"mobile": identifier, "role": "admin"},
         ],
         "status": "active"
     }
@@ -7927,6 +7905,12 @@ async def salon_user_login(credentials: SalonUserLogin):
     
     if not salon_user:
         raise HTTPException(status_code=404, detail="User not found or inactive")
+
+    # A deactivated staff member loses access even if their login still exists.
+    if salon_user.get("staff_id"):
+        linked = await db.barbers.find_one({"id": salon_user["staff_id"]}, {"_id": 0, "is_active": 1})
+        if linked is not None and linked.get("is_active") is False:
+            raise HTTPException(status_code=403, detail="This staff member is inactive. Ask your salon admin to reactivate access.")
     
     # Verify password
     if not pwd_context.verify(credentials.password, salon_user["password_hash"]):
@@ -20789,18 +20773,16 @@ async def update_staff_credentials(
 
     updates: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
 
+    # The account id is fixed up front so the login ID can be reserved for it.
+    account_id = account["id"] if account else str(uuid.uuid4())
+
     if body.login_id is not None:
         lid = (body.login_id or "").strip()
         if len(lid) < 6:
             raise HTTPException(status_code=400, detail="login_id must be at least 6 characters")
-        # Uniqueness — case-insensitive, salon_users only.
-        rx = f"^{re.escape(lid)}$"
-        q = {"login_id": {"$regex": rx, "$options": "i"}}
-        if account:
-            q["id"] = {"$ne": account["id"]}
-        collide = await db.salon_users.find_one(q, {"_id": 0, "id": 1})
-        if collide:
-            raise HTTPException(status_code=400, detail=f"login_id '{lid}' is already taken")
+        # Platform-wide uniqueness (registry + salon_users, case-insensitive);
+        # same check every other login-ID path uses.
+        await claim_login_id(lid, owner_type="staff", owner_id=account_id, salon_id=salon_id)
         updates["login_id"] = lid
 
     if body.password is not None:
@@ -20831,7 +20813,6 @@ async def update_staff_credentials(
         mobile = barber.get("mobile") or ""
         if mobile and not str(mobile).startswith("+91") and str(mobile).isdigit():
             mobile = f"+91{mobile}"
-        account_id = str(uuid.uuid4())
         new_account = {
             "id": account_id,
             "salon_id": salon_id,
