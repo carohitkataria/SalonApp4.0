@@ -7273,10 +7273,44 @@ async def update_barber(barber_id: str, barber_update: BarberUpdate, current_use
     existing = await db.barbers.find_one({"id": barber_id}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Barber not found")
+    _assert_salon_scope(current_user, existing.get("salon_id"))
     
     update_data = {k: v for k, v in barber_update.model_dump().items() if v is not None}
+    linked_account = None
+    if "mobile" in update_data:
+        # The mobile number is also the staff member's login number, so it
+        # must be valid and unique, and their login account moves with it.
+        digits = re.sub(r"\D", "", update_data["mobile"] or "")
+        if len(digits) == 12 and digits.startswith("91"):
+            digits = digits[2:]
+        if len(digits) != 10:
+            raise HTTPException(status_code=400, detail="Enter a valid 10-digit mobile number")
+        mobile = f"+91{digits}"
+        update_data["mobile"] = mobile
+        if mobile != existing.get("mobile"):
+            variants = [mobile, digits, f"91{digits}"]
+            if await db.barbers.find_one(
+                {"salon_id": existing.get("salon_id"), "id": {"$ne": barber_id},
+                 "mobile": {"$in": variants}, "is_active": {"$ne": False}},
+                {"_id": 0, "id": 1},
+            ):
+                raise HTTPException(status_code=409, detail="Another staff member already uses this mobile number")
+            linked_account = await db.salon_users.find_one(
+                {"staff_id": barber_id, "salon_id": existing.get("salon_id")}, {"_id": 0, "id": 1})
+            clash = await db.salon_users.find_one(
+                {"mobile": {"$in": variants},
+                 **({"id": {"$ne": linked_account["id"]}} if linked_account else {})},
+                {"_id": 0, "id": 1},
+            )
+            if clash:
+                raise HTTPException(status_code=409, detail="This mobile number is already used for another login")
     if update_data:
         await db.barbers.update_one({"id": barber_id}, {"$set": update_data})
+    if linked_account:
+        await db.salon_users.update_one(
+            {"id": linked_account["id"]},
+            {"$set": {"mobile": update_data["mobile"], "updated_at": datetime.now(timezone.utc).isoformat()}},
+        )
     
     updated = await db.barbers.find_one({"id": barber_id}, {"_id": 0})
     # Normalize before returning to ensure Pydantic validation passes
@@ -22383,6 +22417,7 @@ async def startup_event():
             db.salons.create_index("id", background=True),
             db.salon_users.create_index([("salon_id", 1), ("phone", 1)], background=True),
             db.salon_users.create_index("login_id", background=True),
+            db.salon_users.create_index("mobile", background=True),  # login by mobile + staff mobile edits
             db.salon_customers.create_index([("salon_id", 1), ("phone", 1)], background=True),
             db.services.create_index([("salon_id", 1), ("is_enabled", 1)], background=True),
             db.services.create_index("id", background=True),

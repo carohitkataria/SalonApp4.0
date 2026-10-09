@@ -1164,6 +1164,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     if (!canEdit) return toast.error("You don't have permission to edit staff");
     setProfileDraft({
       name: selected?.name || '',
+      mobile: String(selected?.mobile || selected?.phone || '').replace(/\D/g, '').slice(-10),
       experience: selected?.experience ?? 0,
       category: selected?.category || '',
       department: selected?.department || '',
@@ -1183,6 +1184,12 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     if (!selected) return;
     try {
       const payload = { ...profileDraft };
+      // Mobile is also the staff login number — only send it when it changed.
+      const digits = String(payload.mobile || '').replace(/\D/g, '');
+      const current = String(selected?.mobile || selected?.phone || '').replace(/\D/g, '').slice(-10);
+      if (digits.length !== 10) return toast.error('Enter a valid 10-digit mobile number');
+      if (digits === current) delete payload.mobile;
+      else payload.mobile = `+91${digits}`;
       // Normalise blanks so the backend doesn't reject empty date strings.
       if (!payload.dob) payload.dob = null;
       if (!payload.doj) payload.doj = null;
@@ -1414,8 +1421,19 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
           <div className="field"><label>Full name <span className="req">*</span></label>
             <input value={editingProfile ? profileDraft.name : (s.name || '')} disabled={!editingProfile}
               onChange={(e) => setProfileDraft({ ...profileDraft, name: e.target.value })} /></div>
-          <div className="field"><label>Mobile number</label>
-            {(s.phone || s.mobile) ? (
+          <div className="field"><label>Mobile number{editingProfile && <span className="req"> *</span>}</label>
+            {editingProfile ? (
+              <>
+                <input
+                  type="tel" inputMode="numeric" maxLength={10}
+                  value={profileDraft.mobile || ''}
+                  placeholder="10-digit mobile"
+                  onChange={(e) => setProfileDraft({ ...profileDraft, mobile: e.target.value.replace(/\D/g, '').slice(0, 10) })}
+                  data-testid="staff-mobile-input"
+                />
+                <span className="hint" style={{ fontSize: 11, color: 'var(--muted)' }}>Also the staff member's login number.</span>
+              </>
+            ) : (s.phone || s.mobile) ? (
               <a
                 href={`tel:${(s.phone || s.mobile).replace(/\s+/g, '')}`}
                 className="tel-link"
