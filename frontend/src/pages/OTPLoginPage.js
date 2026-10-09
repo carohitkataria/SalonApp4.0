@@ -375,7 +375,7 @@ export default function OTPLoginPage() {
                     />
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Enter your mobile number or login ID
+                    Salon owner: your salon's mobile number. Staff: the login ID your salon set for you.
                   </p>
                 </div>
 

@@ -8,6 +8,7 @@ import {
   LogIn, LogOut, Clock, Users, Scissors, RefreshCw, LayoutDashboard,
   CheckCircle2, Timer, CalendarClock,
 } from 'lucide-react';
+import { isCheckInMode, getBrowserLocation, fmtMinutes } from '@/lib/attendance';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -82,7 +83,17 @@ export default function StaffPortal() {
     const action = attendance?.is_checked_in ? 'out' : 'in';
     setToggling(true);
     try {
-      await axios.post(`${API}/salons/${salonId}/home/staff-attendance/toggle`, { barber_id: staffId, action }, { headers });
+      const body = { barber_id: staffId, action };
+      if (action === 'in' && attendance?.geofence_required) {
+        try {
+          Object.assign(body, await getBrowserLocation());
+        } catch (geoErr) {
+          toast.error(geoErr.message);
+          setToggling(false);
+          return;
+        }
+      }
+      await axios.post(`${API}/salons/${salonId}/home/staff-attendance/toggle`, body, { headers });
       toast.success(action === 'in' ? 'Checked in — have a great shift!' : 'Checked out — see you next time!');
       loadAll();
     } catch (e) {
@@ -95,6 +106,9 @@ export default function StaffPortal() {
   const upNext = queue.filter((t) => ['waiting', 'in_progress'].includes((t.status || '').toLowerCase()));
   const doneToday = queue.filter((t) => (t.status || '').toLowerCase() === 'completed').length;
   const checkedIn = attendance?.is_checked_in;
+  // The card follows the salon's attendance method.
+  const checkInMode = isCheckInMode(attendance?.mode);
+  const canCheck = !!attendance?.can_check_in_out;
   const firstName = (me?.name || 'there').split(' ')[0];
 
   return (
@@ -136,7 +150,7 @@ export default function StaffPortal() {
           </p>
         </div>
 
-        {/* Attendance card */}
+        {/* Attendance card — check-in / check-out only when the salon uses it */}
         <div className="rounded-2xl p-5 md:p-6" style={{ background: checkedIn ? 'linear-gradient(135deg,#0f3d2e,#14532d)' : 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }} data-testid="attendance-card">
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div>
@@ -144,37 +158,51 @@ export default function StaffPortal() {
                 <Clock className="w-3.5 h-3.5" /> Attendance
               </div>
               <div className="mt-1.5 text-white text-lg font-semibold flex items-center gap-2" data-testid="attendance-status">
-                {checkedIn ? (
-                  <><CheckCircle2 className="w-5 h-5 text-green-400" /> Checked in since {fmtTime(attendance?.check_in_at)}</>
+                {!checkInMode ? (
+                  ['present', 'half_day'].includes(attendance?.attendance_status)
+                    ? <><CheckCircle2 className="w-5 h-5 text-green-400" /> Present today</>
+                    : attendance?.attendance_status === 'on_leave'
+                      ? <><Timer className="w-5 h-5 text-white/50" /> On leave today</>
+                      : <><Timer className="w-5 h-5 text-white/50" /> Not marked yet</>
+                ) : checkedIn ? (
+                  <><CheckCircle2 className="w-5 h-5 text-green-400" /> Checked in since {fmtTime(attendance?.check_in_at)}{attendance?.late ? ' · late' : ''}</>
                 ) : attendance?.status === 'out' ? (
-                  <><Timer className="w-5 h-5 text-white/50" /> Checked out for today</>
+                  <><Timer className="w-5 h-5 text-white/50" /> Checked out · {fmtMinutes(attendance?.total_minutes)} today</>
                 ) : (
                   <><Timer className="w-5 h-5 text-white/50" /> Not checked in yet</>
                 )}
               </div>
-              {staffId ? (
-                (attendance?.sessions?.length > 0) && (
-                  <div className="text-white/40 text-xs mt-1.5">
-                    {attendance.sessions.length} session{attendance.sessions.length > 1 ? 's' : ''} today · latest {fmtTime(attendance.sessions[attendance.sessions.length - 1]?.ci)}
-                    {attendance.sessions[attendance.sessions.length - 1]?.co ? ` – ${fmtTime(attendance.sessions[attendance.sessions.length - 1]?.co)}` : ''}
-                  </div>
-                )
-              ) : (
+              {!staffId ? (
                 <div className="text-amber-300/80 text-xs mt-1.5">No staff record linked to your login — ask your manager.</div>
+              ) : !checkInMode ? (
+                <div className="text-white/40 text-xs mt-1.5" data-testid="attendance-hint">
+                  Your attendance is marked automatically when you complete a service.
+                </div>
+              ) : !canCheck ? (
+                <div className="text-white/40 text-xs mt-1.5" data-testid="attendance-hint">
+                  Your manager records your check-in and check-out.
+                </div>
+              ) : (attendance?.sessions?.length > 0) && (
+                <div className="text-white/40 text-xs mt-1.5">
+                  {attendance.sessions.length} session{attendance.sessions.length > 1 ? 's' : ''} today · latest {fmtTime(attendance.sessions[attendance.sessions.length - 1]?.ci)}
+                  {attendance.sessions[attendance.sessions.length - 1]?.co ? ` – ${fmtTime(attendance.sessions[attendance.sessions.length - 1]?.co)}` : ''}
+                </div>
               )}
             </div>
-            <button
-              onClick={toggleAttendance}
-              disabled={toggling || !staffId}
-              data-testid="check-in-out-btn"
-              className="px-6 py-3 rounded-xl font-semibold text-base transition disabled:opacity-50 flex items-center gap-2"
-              style={checkedIn
-                ? { background: '#fff', color: '#991B1B' }
-                : { background: 'linear-gradient(135deg,#E8B923,#C99700)', color: '#000' }}
-            >
-              {checkedIn ? <LogOut className="w-5 h-5" /> : <LogIn className="w-5 h-5" />}
-              {toggling ? 'Please wait…' : (checkedIn ? 'Check out' : 'Check in')}
-            </button>
+            {checkInMode && canCheck && (
+              <button
+                onClick={toggleAttendance}
+                disabled={toggling || !staffId}
+                data-testid="check-in-out-btn"
+                className="px-6 py-3 rounded-xl font-semibold text-base transition disabled:opacity-50 flex items-center gap-2"
+                style={checkedIn
+                  ? { background: '#fff', color: '#991B1B' }
+                  : { background: 'linear-gradient(135deg,#E8B923,#C99700)', color: '#000' }}
+              >
+                {checkedIn ? <LogOut className="w-5 h-5" /> : <LogIn className="w-5 h-5" />}
+                {toggling ? 'Please wait…' : (checkedIn ? 'Check out' : 'Check in')}
+              </button>
+            )}
           </div>
         </div>
 

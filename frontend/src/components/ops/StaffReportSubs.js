@@ -13,6 +13,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
+import { istToday, fmtIstClock, fmtMinutes } from '@/lib/attendance';
 import { toast } from 'sonner';
 import { Icon, rupee, injectZenCss } from './opsTheme';
 import {
@@ -400,8 +401,8 @@ const ATT_STATUS_PILL = { P: 'z-pill--ok', H: 'z-pill--warn', A: 'z-pill--bad', 
 
 export function StaffAttendanceSub({ salonId, date, branchId, getAuthHeaders }) {
   useEffect(() => { injectZenCss(); }, []);
-  const firstOfMonth = () => { const d = new Date(); d.setDate(1); return d.toISOString().slice(0, 10); };
-  const [range, setRange] = useState({ start: firstOfMonth(), end: (date || new Date().toISOString().slice(0, 10)) });
+  const firstOfMonth = () => `${istToday().slice(0, 7)}-01`;
+  const [range, setRange] = useState({ start: firstOfMonth(), end: (date || istToday()) });
   const [barbers, setBarbers] = useState([]);
   const [selectedBarbers, setSelectedBarbers] = useState([]);
   const [rows, setRows] = useState([]);
@@ -457,7 +458,18 @@ export function StaffAttendanceSub({ salonId, date, branchId, getAuthHeaders }) 
 
   const toggleBarber = (id) => setSelectedBarbers((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   const tally = rows.reduce((acc, r) => { const k = r.status || ''; if (acc[k] != null) acc[k] += 1; return acc; }, { P: 0, H: 0, A: 0, L: 0, HOL: 0 });
-  const fmtTime = (t) => (t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—');
+  const fmtTime = (t) => (t ? fmtIstClock(t) : '—');
+  // Columns follow the attendance method of the days in range: check-in
+  // columns only for check-in days, a Services column for service days.
+  const hasCheckIn = rows.some((r) => r.mode === 'geo_checkin');
+  const hasService = rows.some((r) => r.mode !== 'geo_checkin');
+  const cols = [
+    'Branch', 'Date', 'Staff', 'Status', 'Leave',
+    ...(hasCheckIn ? ['Check-in', 'Check-out', 'Worked'] : []),
+    ...(hasService ? ['Services'] : []),
+    'Marked By',
+    ...(hasCheckIn && hasService ? ['Method'] : []),
+  ];
 
   return (
     <div className="zen" data-testid="staff-attendance-report">
@@ -501,16 +513,16 @@ export function StaffAttendanceSub({ salonId, date, branchId, getAuthHeaders }) 
           <table className="z-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ borderBottom: '1px solid #E6EBF4' }}>
-                {['Branch', 'Date', 'Staff', 'Status', 'Leave', 'Check-in', 'Check-out', 'Worked', 'Marked By', 'Mode'].map((h) => (
+                {cols.map((h) => (
                   <th key={h} style={{ textAlign: 'left', padding: '10px 8px', fontSize: 12, color: 'var(--z-muted)' }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={10} style={{ textAlign: 'center', padding: 24, color: 'var(--z-muted)' }}>Loading…</td></tr>
+                <tr><td colSpan={cols.length} style={{ textAlign: 'center', padding: 24, color: 'var(--z-muted)' }}>Loading…</td></tr>
               ) : !rows.length ? (
-                <tr><td colSpan={10} style={{ textAlign: 'center', padding: 24, color: 'var(--z-muted)' }}>No data in this range.</td></tr>
+                <tr><td colSpan={cols.length} style={{ textAlign: 'center', padding: 24, color: 'var(--z-muted)' }}>No data in this range.</td></tr>
               ) : rows.map((r, i) => (
                 <tr key={`${r.staff_id}-${r.date}-${i}`} style={{ borderBottom: '1px solid #F4F7FC' }}>
                   <td style={{ padding: '8px', color: 'var(--z-muted)' }}>{r.branch}</td>
@@ -518,17 +530,24 @@ export function StaffAttendanceSub({ salonId, date, branchId, getAuthHeaders }) 
                   <td style={{ padding: '8px', fontWeight: 600 }}>{r.staff_name}</td>
                   <td style={{ padding: '8px' }}>{r.status ? <span className={`z-pill ${ATT_STATUS_PILL[r.status] || ''}`}>{r.status}</span> : <span style={{ color: 'var(--z-muted)' }}>—</span>}</td>
                   <td style={{ padding: '8px', color: 'var(--z-muted)' }}>{r.leave_type || '—'}</td>
-                  <td style={{ padding: '8px', color: 'var(--z-muted)' }}>{fmtTime(r.check_in)}</td>
-                  <td style={{ padding: '8px', color: 'var(--z-muted)' }}>{fmtTime(r.check_out)}</td>
-                  <td style={{ padding: '8px' }}>{r.worked_minutes != null ? `${Math.floor(r.worked_minutes / 60)}h ${r.worked_minutes % 60}m` : '—'}</td>
+                  {hasCheckIn && <td style={{ padding: '8px', color: 'var(--z-muted)' }}>{r.mode === 'geo_checkin' ? fmtTime(r.check_in) : '—'}</td>}
+                  {hasCheckIn && <td style={{ padding: '8px', color: 'var(--z-muted)' }}>{r.mode === 'geo_checkin' ? fmtTime(r.check_out) : '—'}</td>}
+                  {hasCheckIn && <td style={{ padding: '8px' }}>{r.mode === 'geo_checkin' && r.worked_minutes != null ? fmtMinutes(r.worked_minutes) : '—'}</td>}
+                  {hasService && <td style={{ padding: '8px' }}>{r.mode !== 'geo_checkin' ? (r.services_completed || 0) : '—'}</td>}
                   <td style={{ padding: '8px' }}>{r.marked_by_label && r.marked_by_label !== '—' ? <span className="z-pill z-pill--blue">{r.marked_by_label}</span> : <span style={{ color: 'var(--z-muted)' }}>—</span>}</td>
-                  <td style={{ padding: '8px', fontSize: 11, color: 'var(--z-muted)' }}>{r.mode === 'geo_checkin' ? 'Geo' : r.mode === 'service_completion' ? 'Service' : '—'}</td>
+                  {hasCheckIn && hasService && <td style={{ padding: '8px', fontSize: 11, color: 'var(--z-muted)' }}>{r.mode === 'geo_checkin' ? 'Check-in' : 'Service'}</td>}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <p style={{ fontSize: 11, color: 'var(--z-muted)', marginTop: 10 }}>Each row reflects the attendance mode active on that specific date — so months spanning a switch read correctly.</p>
+        <p style={{ fontSize: 11, color: 'var(--z-muted)', marginTop: 10 }}>
+          {hasCheckIn && hasService
+            ? 'This range spans a change of attendance method — each day follows the method that was active on it.'
+            : hasCheckIn
+              ? 'Attendance from check-in / check-out times (IST).'
+              : 'Attendance from completed services: present on days with at least one completed service.'}
+        </p>
       </div>
     </div>
   );

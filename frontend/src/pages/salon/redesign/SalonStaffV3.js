@@ -16,6 +16,11 @@ import { useAuth } from '@/contexts/AuthContext';
 import { STAFF_V3_CSS } from './StaffV3Styles';
 import StaffAccessSection from '@/components/staff/access/StaffAccessSection';
 import RolesAndAccessView from '@/components/staff/access/RolesAndAccessView';
+import QuickAttendanceDrawer from '../home_v2/QuickAttendanceDrawer';
+import {
+  isCheckInMode, normalizeAttendanceMode, attendanceModeLabel, istToday, isoToIstHHMM,
+  STATUS_META, ATTENDANCE_CHANGED_EVENT, notifyAttendanceChanged,
+} from '@/lib/attendance';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -190,15 +195,20 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
   // Set when another surface (e.g. right-rail "Mark Attendance") requests the
   // quick-attendance drawer be opened. An effect below opens it once staff load.
   const [pendingAtt, setPendingAtt] = useState(false);
-  const [ribbonStatus, setRibbonStatus] = useState({}); // { barber_id: 'present'|'absent'|... }
-  const [ribbonBusy, setRibbonBusy] = useState(false);
-  const [ribbonTimes, setRibbonTimes] = useState({}); // { barber_id: {check_in, check_out} } for geo mode
-  // Attendance date — defaults to TODAY (IST); admin may pick a past date to back-fill.
-  const todayIST = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-  const [ribbonDate, setRibbonDate] = useState(todayIST());
   const [showInactive, setShowInactive] = useState(false);
   const [activeBusyId, setActiveBusyId] = useState(null);
-  const [todayStatus, setTodayStatus] = useState({}); // reflected on list rows after save
+  // Live "today" attendance per staff for the list pills (same data as the Home card).
+  const [todayAtt, setTodayAtt] = useState({});
+  const fetchTodayAtt = useCallback(async () => {
+    if (!salonId) return;
+    try {
+      const res = await axios.get(`${API}/salons/${salonId}/staff-attendance/day`, { headers: getAuthHeaders?.() || {} });
+      const m = {};
+      (res.data?.rows || []).forEach((r) => { m[r.barber_id] = r; });
+      setTodayAtt(m);
+    } catch (_) { /* pills are optional */ }
+  }, [salonId, getAuthHeaders]);
+  useEffect(() => { fetchTodayAtt(); }, [fetchTodayAtt]);
   const [prorationBasis, setProrationBasis] = useState('calendar_days');
   useEffect(() => {
     if (!salonId) return;
@@ -219,22 +229,12 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     } catch (e) { /* noop */ }
     return () => window.removeEventListener('open-attendance', handler);
   }, []);
-  // Once staff have loaded, seed & open the drawer (mirrors openRibbon()).
+  // Open the shared quick-attendance drawer when another surface asks for it.
   useEffect(() => {
-    if (!pendingAtt || ribbonOpen) return;
-    const act = (staff || []).filter((s) => s.is_active !== false);
-    if (act.length === 0) return;
-    const initS = {}; const initT = {};
-    act.forEach((s) => {
-      initS[s.id] = todayStatus[s.id] || 'present';
-      initT[s.id] = ribbonTimes[s.id] || { check_in: salonSettings?.shift_start || '10:00', check_out: '' };
-    });
-    setRibbonStatus(initS);
-    setRibbonTimes(initT);
-    setRibbonDate(todayIST());
+    if (!pendingAtt) return;
     setRibbonOpen(true);
     setPendingAtt(false);
-  }, [pendingAtt, ribbonOpen, staff, todayStatus, salonSettings]);
+  }, [pendingAtt]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
@@ -337,8 +337,8 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
       setSalon(salonData);
       // Attendance settings snapshot (from salon record)
       setSalonSettings({
-        attendance_method: salonData.attendance_mode || salonData.attendance_method || 'service_completion',
-        shift_start: salonData.shift_start || '10:00',
+        attendance_method: normalizeAttendanceMode(salonData.attendance_mode || salonData.attendance_method),
+        shift_start: salonData.shift_start || '',
         shift_end: salonData.shift_end || '20:00',
         grace_period_min: salonData.grace_period_min || 15,
         half_day_max_hours: salonData.half_day_max_hours || 4,
@@ -346,7 +346,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
         auto_checkout: salonData.auto_checkout ?? true,
         auto_checkout_time: salonData.auto_checkout_time || '21:00',
         allow_self_checkin: salonData.allow_self_checkin ?? true,
-        geofence_required: salonData.geofence_required ?? false,
+        geofence_required: salonData.geofence_required ?? true,
         overtime_after_hours: salonData.overtime_after_hours || 9,
         weekly_off: salonData.weekly_off || 'Sunday',
       });
@@ -388,7 +388,12 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
       const days = {};
       arr.forEach((r) => {
         const st = String(r.status || '').toLowerCase();
-        days[r.date] = { status: st, note: r.override_note, marked_by: r.marked_by_name };
+        const sess = Array.isArray(r.sessions) && r.sessions.length ? r.sessions : (r.check_in_at ? [{ ci: r.check_in_at, co: r.check_out_at }] : []);
+        days[r.date] = {
+          status: st, note: r.override_note, marked_by: r.marked_by_name,
+          check_in_time: isoToIstHHMM(sess[0]?.ci),
+          check_out_time: isoToIstHHMM(sess[sess.length - 1]?.co),
+        };
         if (st === 'present') s.P += 1;
         else if (st === 'absent') s.A += 1;
         else if (st === 'half_day' || st === 'half-day') s.H += 1;
@@ -401,14 +406,19 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
   }, [selectedId, salonId, attMonth, getAuthHeaders]);
 
   useEffect(() => { fetchAttendanceMonth(); }, [fetchAttendanceMonth]);
+  // Changes made on the Home card, ribbon drawer or Settings refresh this page too.
+  useEffect(() => {
+    const onChange = () => { fetchAttendanceMonth(); fetchTodayAtt(); };
+    window.addEventListener(ATTENDANCE_CHANGED_EVENT, onChange);
+    return () => window.removeEventListener(ATTENDANCE_CHANGED_EVENT, onChange);
+  }, [fetchAttendanceMonth, fetchTodayAtt]);
 
   // Cycle attendance status on click: blank → present → half_day → absent → holiday → on_leave → blank
   const CYCLE = ['present', 'half_day', 'absent', 'holiday', 'on_leave'];
   const cycleAttendance = async (date) => {
     if (!canAttendance || !selected) return;
     // Guard: don't allow future dates
-    const today = new Date().toISOString().slice(0, 10);
-    if (date > today) return toast.error("Can't mark attendance for future dates");
+    if (date > istToday()) return toast.error("Can't mark attendance for future dates");
     const key = `${selectedId}::${date}`;
     if (attSaving[key]) return;
     setAttSaving((prev) => ({ ...prev, [key]: true }));
@@ -451,6 +461,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
         else if (st === 'leave' || st === 'on_leave') s.L += 1;
       });
       setAttendanceSummary((prev) => ({ ...prev, [selectedId]: s }));
+      notifyAttendanceChanged();
     } catch (err) {
       // Revert on failure
       setAttendanceGrid((prev) => ({ ...prev, [selectedId]: { month: attMonth, days: grid } }));
@@ -735,8 +746,9 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
       // Weekly-off days with no explicit record default to Holiday so they are
       // already shown as holiday and preserved during bulk marking.
       const isWeeklyOff = WEEKDAY_NAMES[d.getUTCDay()] === weeklyOff;
-      const inT = rec?.check_in_time || (st === 'present' || st === 'half_day' ? (salonSettings.shift_start || '10:00') : '');
-      const outT = rec?.check_out_time || (st === 'present' ? (salonSettings.shift_end || '20:00') : '');
+      // Real check-in / check-out times only — never invent default times.
+      const inT = rec?.check_in_time || '';
+      const outT = rec?.check_out_time || '';
       let statusCode = st === 'half_day' ? 'H' : st === 'absent' ? 'A' : st === 'holiday' ? 'HO' : st === 'leave' || st === 'on_leave' ? 'L' : st === 'present' ? 'P' : '';
       if (!statusCode && isWeeklyOff) statusCode = 'HO';
       rows.push({
@@ -785,8 +797,19 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     setAttBusy(true);
     const statusMap = { P: 'present', A: 'absent', H: 'half_day', HO: 'holiday', L: 'on_leave' };
     // Only rows whose status actually changed vs the loaded snapshot are sent.
+    // In check-in mode, edited in / out times are saved as a real check-in
+    // session (hours and status are recomputed on the server).
+    const ciMode = isCheckInMode(salonSettings.attendance_method);
+    const timesChanged = (r) => ciMode && ['P', 'H'].includes(r.status) && !!r.in
+      && ((r.in || '') !== (r.initialIn || '') || (r.out || '') !== (r.initialOut || ''));
+    const badTimes = attRows.find((r) => timesChanged(r) && r.out && r.out <= r.in);
+    if (badTimes) {
+      setAttBusy(false);
+      toast.error(`${badTimes.date}: check-out must be after check-in`);
+      return;
+    }
     const changed = attRows.filter(
-      (r) => (r.status || '') !== (r.initialStatus || ''),
+      (r) => (r.status || '') !== (r.initialStatus || '') || timesChanged(r),
     );
     if (changed.length === 0) {
       setAttBusy(false);
@@ -803,7 +826,18 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     // hammering the API with all N requests at once.
     const runRow = async (row) => {
       try {
-        if (!row.status) {
+        if (timesChanged(row)) {
+          const res = await axios.post(`${API}/salons/${salonId}/attendance/mark`, {
+            date: row.date,
+            rows: [{ barber_id: selectedId, check_in: row.in, check_out: row.out || null, status: statusMap[row.status] }],
+          }, { headers: getAuthHeaders?.() || {} });
+          const skip = (res.data?.skipped || [])[0];
+          if (skip) {
+            const e = new Error(skip.reason);
+            e.response = { status: /locked/i.test(String(skip.reason)) ? 423 : 400, data: { detail: skip.reason } };
+            throw e;
+          }
+        } else if (!row.status) {
           await axios.delete(`${API}/salons/${salonId}/staff-attendance/override/${selectedId}/${row.date}`, {
             headers: getAuthHeaders?.() || {},
           });
@@ -849,6 +883,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     const month = attRows[0]?.date.slice(0, 7) || attMonth;
     if (month !== attMonth) setAttMonth(month);
     else fetchAttendanceMonth();
+    notifyAttendanceChanged();
   };
 
   // ============ Salary drawer helpers ============
@@ -1048,7 +1083,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     const name = newStaff.name.trim();
     const phone = (newStaff.mobile || '').replace(/\D/g, '');
     if (!name) return toast.error('Enter full name');
-    if (phone.length < 10) return toast.error('Mobile number is required (login ID)');
+    if (phone.length < 10) return toast.error('Enter a valid 10-digit mobile number');
     const mobile = `+91${phone.slice(-10)}`;
     setAddBusy(true);
     try {
@@ -1101,7 +1136,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
         }
       }
 
-      toast.success('Staff added · login ID ' + phone);
+      toast.success('Staff added. Set up their login under Access if they need one.');
       setAddOpen(false);
       setNewStaff(EMPTY_NEW_STAFF);
       setNewDocs({});
@@ -1129,6 +1164,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     if (!canEdit) return toast.error("You don't have permission to edit staff");
     setProfileDraft({
       name: selected?.name || '',
+      mobile: String(selected?.mobile || selected?.phone || '').replace(/\D/g, '').slice(-10),
       experience: selected?.experience ?? 0,
       category: selected?.category || '',
       department: selected?.department || '',
@@ -1148,6 +1184,12 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     if (!selected) return;
     try {
       const payload = { ...profileDraft };
+      // Mobile is a contact number (login is set under Access) — send only when changed.
+      const digits = String(payload.mobile || '').replace(/\D/g, '');
+      const current = String(selected?.mobile || selected?.phone || '').replace(/\D/g, '').slice(-10);
+      if (digits.length !== 10) return toast.error('Enter a valid 10-digit mobile number');
+      if (digits === current) delete payload.mobile;
+      else payload.mobile = `+91${digits}`;
       // Normalise blanks so the backend doesn't reject empty date strings.
       if (!payload.dob) payload.dob = null;
       if (!payload.doj) payload.doj = null;
@@ -1213,12 +1255,20 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
             <b>{s.name}{inactive && <span style={{ fontSize: 9.5, fontWeight: 800, color: '#B0455F', background: '#FCE4EC', borderRadius: 5, padding: '1px 6px', marginLeft: 6 }}>INACTIVE</span>}</b>
             <span>{(s.category || 'Junior')} · {s.experience || 0} yr{s.experience === 1 ? '' : 's'}</span>
           </div>
-          {!inactive && todayStatus[s.id] && ATT_META[todayStatus[s.id]] && (
-            <span title={`Today: ${ATT_META[todayStatus[s.id]].full}`}
-              style={{ fontSize: 10, fontWeight: 900, borderRadius: 6, padding: '2px 7px', marginRight: 4, background: ATT_META[todayStatus[s.id]].bg, color: ATT_META[todayStatus[s.id]].fg }}>
-              {ATT_META[todayStatus[s.id]].lb}
-            </span>
-          )}
+          {!inactive && (() => {
+            const t = todayAtt[s.id];
+            if (!t) return null;
+            const meta = t.is_checked_in
+              ? { lb: 'IN', full: 'Checked in', bg: '#E4F6ED', fg: '#1F8F52' }
+              : STATUS_META[t.status];
+            if (!meta) return null;
+            return (
+              <span title={`Today: ${meta.full}`} data-testid={`staff-today-pill-${s.id}`}
+                style={{ fontSize: 10, fontWeight: 900, borderRadius: 6, padding: '2px 7px', marginRight: 4, background: meta.bg, color: meta.fg }}>
+                {meta.lb}
+              </span>
+            );
+          })()}
           <svg className="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
         </div>
         {on && (
@@ -1371,8 +1421,18 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
           <div className="field"><label>Full name <span className="req">*</span></label>
             <input value={editingProfile ? profileDraft.name : (s.name || '')} disabled={!editingProfile}
               onChange={(e) => setProfileDraft({ ...profileDraft, name: e.target.value })} /></div>
-          <div className="field"><label>Mobile number</label>
-            {(s.phone || s.mobile) ? (
+          <div className="field"><label>Mobile number{editingProfile && <span className="req"> *</span>}</label>
+            {editingProfile ? (
+              <>
+                <input
+                  type="tel" inputMode="numeric" maxLength={10}
+                  value={profileDraft.mobile || ''}
+                  placeholder="10-digit mobile"
+                  onChange={(e) => setProfileDraft({ ...profileDraft, mobile: e.target.value.replace(/\D/g, '').slice(0, 10) })}
+                  data-testid="staff-mobile-input"
+                />
+              </>
+            ) : (s.phone || s.mobile) ? (
               <a
                 href={`tel:${(s.phone || s.mobile).replace(/\s+/g, '')}`}
                 className="tel-link"
@@ -1467,26 +1527,38 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
     }
     const s = selected;
     const M = salonSettings;
-    const isCI = M.attendance_method === 'checkinout' || M.attendance_method === 'geo_checkin';
+    const isCI = isCheckInMode(M.attendance_method);
+    const t = todayAtt[s.id];
     return (
       <>
-        <div className="method-note">
+        <div className="method-note" data-testid="staff-att-method-note">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-          Rules come from <b style={{ margin: '0 4px' }}>Settings → Staff &amp; Attendance</b>. Current method: <b style={{ marginLeft: 4 }}>{isCI ? 'Check-in / Check-out' : 'Service completion'}</b>
+          {isCI
+            ? <>Method: <b style={{ margin: '0 4px' }}>Check-in / Check-out</b> — staff are present from their check-in and check-out times.</>
+            : <>Method: <b style={{ margin: '0 4px' }}>Service completion</b> — staff are present on days they complete at least one service.</>}
+          {' '}Change it in <b style={{ marginLeft: 4 }}>Settings → Staff &amp; Attendance</b>.
         </div>
+        {t && (
+          <div className="secttl" style={{ fontSize: 12.5 }} data-testid="staff-att-today">
+            Today:{' '}
+            {isCI
+              ? (t.is_checked_in
+                ? `Checked in since ${isoToIstHHMM(t.check_in_at)}${t.late ? ' (late)' : ''}`
+                : (t.sessions?.length ? `Checked out at ${isoToIstHHMM(t.check_out_at)}` : (STATUS_META[t.status]?.full || 'Not checked in')))
+              : (STATUS_META[t.status]?.full || 'No services yet')
+                + (t.services_completed ? ` · ${t.services_completed} service${t.services_completed > 1 ? 's' : ''} completed` : '')}
+          </div>
+        )}
         {isCI && (
           <>
             <div className="secttl">Check-in / check-out rules</div>
             <div className="shift-grid">
-              <div className="shift-c"><span className="k">Shift</span><span className="v">{M.shift_start} – {M.shift_end}</span></div>
-              <div className="shift-c"><span className="k">Grace period</span><span className="v">{M.grace_period_min} min</span></div>
-              <div className="shift-c"><span className="k">Half-day under</span><span className="v">{M.half_day_max_hours} hrs</span></div>
+              <div className="shift-c"><span className="k">Shift start</span><span className="v">{M.shift_start || 'Opening time'}</span></div>
+              <div className="shift-c"><span className="k">Late after</span><span className="v">{M.grace_period_min} min</span></div>
               <div className="shift-c"><span className="k">Full day min</span><span className="v">{M.min_hours_full_day} hrs</span></div>
               <div className="shift-c"><span className="k">Auto check-out</span><span className="v">{M.auto_checkout ? M.auto_checkout_time : 'Off'}</span></div>
-              <div className="shift-c"><span className="k">Overtime after</span><span className="v">{M.overtime_after_hours} hrs</span></div>
               <div className="shift-c"><span className="k">Self check-in</span><span className="v">{M.allow_self_checkin ? 'Allowed' : 'Admin only'}</span></div>
               <div className="shift-c"><span className="k">Geo-fence</span><span className="v">{M.geofence_required ? 'Required' : 'Off'}</span></div>
-              <div className="shift-c"><span className="k">Weekly off</span><span className="v">{M.weekly_off}</span></div>
             </div>
           </>
         )}
@@ -1520,7 +1592,9 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
           <svg viewBox="0 0 24 24" style={{ width: 13, height: 13, color: 'var(--green)', fill: 'none', stroke: 'currentColor', strokeWidth: 2 }}>
             <path d="M23 4v6h-6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
           </svg>
-          Home-page admin check-in/out writes this same record — always in sync.
+          {isCI
+            ? 'Home card, staff self check-in and this calendar use the same record — always in sync.'
+            : 'Completed services, the Home card and this calendar use the same record — always in sync.'}
         </p>
 
         {canSalaryView && (
@@ -1827,69 +1901,9 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
   };
 
   // ---------- Section 2/3: quick attendance drawer + salary basis ----------
-  const ATT_CYCLE = ['present', 'half_day', 'absent', 'holiday', 'on_leave'];
-  const ATT_META = {
-    present:  { lb: 'P',  full: 'Present',  bg: '#E4F6ED', fg: '#1F8F52' },
-    half_day: { lb: 'HD', full: 'Half day', bg: '#F1EEFF', fg: '#6C4FE0' },
-    absent:   { lb: 'A',  full: 'Absent',   bg: '#FCE4EC', fg: '#C33C5F' },
-    holiday:  { lb: 'H',  full: 'Holiday',  bg: '#F1F2F6', fg: '#7C8092' },
-    on_leave: { lb: 'L',  full: 'On leave', bg: '#FFF3DC', fg: '#B87A0A' },
-  };
-  const isGeoMode = ['checkinout', 'geo_checkin', 'geo'].includes(salonSettings?.attendance_method);
   const activeStaff = (staff || []).filter((s) => s.is_active !== false);
   const inactiveStaff = (staff || []).filter((s) => s.is_active === false);
-
-  const openRibbon = () => {
-    // default everyone Present (service mode) / shift times (geo mode), then tweak
-    const initS = {}; const initT = {};
-    activeStaff.forEach((s) => {
-      initS[s.id] = todayStatus[s.id] || 'present';
-      initT[s.id] = ribbonTimes[s.id] || { check_in: salonSettings?.shift_start || '10:00', check_out: '' };
-    });
-    setRibbonStatus(initS);
-    setRibbonTimes(initT);
-    setRibbonDate(todayIST());
-    setRibbonOpen(true);
-  };
-  const cycleRibbon = (id) => {
-    setRibbonStatus((prev) => {
-      const cur = prev[id] || 'present';
-      const next = ATT_CYCLE[(ATT_CYCLE.indexOf(cur) + 1) % ATT_CYCLE.length];
-      return { ...prev, [id]: next };
-    });
-  };
-  const setRibbonStatusFor = (id, status) => setRibbonStatus((prev) => ({ ...prev, [id]: status }));
-  const setRibbonTimeFor = (id, key, val) => setRibbonTimes((prev) => ({ ...prev, [id]: { ...(prev[id] || {}), [key]: val } }));
-  const setAllRibbon = (status) => {
-    const m = {}; activeStaff.forEach((s) => { m[s.id] = status; }); setRibbonStatus(m);
-  };
-  const saveRibbon = async () => {
-    setRibbonBusy(true);
-    try {
-      let rows;
-      if (isGeoMode) {
-        rows = activeStaff.map((s) => {
-          const t = ribbonTimes[s.id] || {};
-          const st = ribbonStatus[s.id];
-          // In geo mode a status override (absent/holiday/leave) wins; otherwise send times.
-          if (st && st !== 'present' && st !== 'half_day') return { barber_id: s.id, status: st };
-          return { barber_id: s.id, check_in: t.check_in || null, check_out: t.check_out || null };
-        });
-      } else {
-        rows = Object.entries(ribbonStatus).map(([barber_id, status]) => ({ barber_id, status }));
-      }
-      const isToday = ribbonDate === todayIST();
-      const res = await axios.post(`${API}/salons/${salonId}/attendance/mark`, { rows, date: ribbonDate },
-        { headers: getAuthHeaders?.() || {} });
-      // Only refresh the "today" chips when we actually marked today.
-      if (isToday) setTodayStatus({ ...todayStatus, ...ribbonStatus });
-      const whenLabel = isToday ? 'today' : new Date(ribbonDate + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-      toast.success(`Attendance saved for ${res.data?.count ?? rows.length} staff (${whenLabel})`);
-      setRibbonOpen(false);
-    } catch (err) {
-      toast.error(formatApiError(err, 'Could not save attendance'));
-    } finally { setRibbonBusy(false); }
-  };
+  const openRibbon = () => setRibbonOpen(true);
   const changeBasis = async (val) => {
     setProrationBasis(val);
     try {
@@ -1968,112 +1982,13 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
         )}
       </div>
 
-      {/* Section 2 — Bulk quick-attendance drawer (opens from the ribbon) */}
-      <div className={`staffv3-ov ${ribbonOpen ? 'open' : ''}`} onClick={() => !ribbonBusy && setRibbonOpen(false)} />
-      <aside className={`staffv3-drawer wide ${ribbonOpen ? 'open' : ''}`} data-testid="quick-attendance-drawer">
-        <div className="dh">
-          <div className="tt">
-            <div className="ic">
-              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>
-            </div>
-            <div>
-              <h3>{ribbonDate === todayIST() ? "Mark today's attendance" : 'Back-fill attendance'}</h3>
-              <p>{new Date(ribbonDate + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })} · {isGeoMode ? 'Check-in / check-out times' : 'Tap a staff to change status'}</p>
-            </div>
-          </div>
-          <button className="close" onClick={() => setRibbonOpen(false)} disabled={ribbonBusy}>
-            <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-        </div>
-        <div className="db-scroll" style={{ padding: '16px 20px' }}>
-          {/* Attendance date — today by default, past dates allowed */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }} data-testid="quick-attendance-date-row">
-            <span style={{ fontSize: 11.5, color: '#8A8EA0', fontWeight: 700 }}>Attendance date</span>
-            <input type="date" value={ribbonDate} max={todayIST()}
-              onChange={(e) => { const v = e.target.value; if (v && v <= todayIST()) setRibbonDate(v); }}
-              data-testid="quick-attendance-date"
-              style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #E1DDEE', fontSize: 13, fontWeight: 600, color: '#2B2B3A' }} />
-            {ribbonDate !== todayIST() && (
-              <button type="button" onClick={() => setRibbonDate(todayIST())}
-                style={{ fontSize: 11, fontWeight: 800, border: '1px solid #E1DDEE', background: '#fff', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', color: '#7C5CFC' }}>
-                Back to today
-              </button>
-            )}
-          </div>
-          {!isGeoMode && (
-            <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
-              <span style={{ fontSize: 11.5, color: '#8A8EA0', fontWeight: 700 }}>Set all:</span>
-              {ATT_CYCLE.map((st) => (
-                <button key={st} onClick={() => setAllRibbon(st)}
-                  style={{ fontSize: 11, fontWeight: 800, border: 'none', borderRadius: 8, padding: '5px 11px', cursor: 'pointer', background: ATT_META[st].bg, color: ATT_META[st].fg }}>
-                  {ATT_META[st].full}
-                </button>
-              ))}
-            </div>
-          )}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {activeStaff.length === 0 && <div style={{ fontSize: 12.5, color: '#8A8EA0', padding: 12 }}>No active staff to mark.</div>}
-            {activeStaff.map((s) => {
-              const st = ribbonStatus[s.id] || 'present';
-              const t = ribbonTimes[s.id] || {};
-              return (
-                <div key={s.id} data-testid={`ribbon-staff-${s.id}`}
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, border: '1px solid #ECECF3', borderRadius: 12, padding: '10px 12px', background: '#fff' }}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
-                    <span style={{ width: 32, height: 32, borderRadius: 9, background: colorFor(s.name), color: '#fff', fontSize: 12, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>{initial(s.name)}</span>
-                    <span style={{ minWidth: 0 }}>
-                      <span style={{ display: 'block', fontSize: 13, fontWeight: 700, color: '#23252F', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
-                      <span style={{ display: 'block', fontSize: 11, color: '#9298AA', fontWeight: 600 }}>{s.category || 'Junior'}</span>
-                    </span>
-                  </span>
-                  {isGeoMode ? (
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 'none' }}>
-                      {(st === 'absent' || st === 'holiday' || st === 'on_leave') ? (
-                        <span style={{ fontSize: 11, fontWeight: 900, borderRadius: 7, padding: '4px 10px', background: ATT_META[st].bg, color: ATT_META[st].fg }}>{ATT_META[st].full}</span>
-                      ) : (
-                        <>
-                          <input type="time" value={t.check_in || ''} onChange={(e) => setRibbonTimeFor(s.id, 'check_in', e.target.value)}
-                            style={{ border: '1px solid #E4E4EF', borderRadius: 8, padding: '5px 7px', fontSize: 12, fontWeight: 700 }} title="Check-in" />
-                          <span style={{ color: '#9298AA', fontSize: 11 }}>→</span>
-                          <input type="time" value={t.check_out || ''} onChange={(e) => setRibbonTimeFor(s.id, 'check_out', e.target.value)}
-                            style={{ border: '1px solid #E4E4EF', borderRadius: 8, padding: '5px 7px', fontSize: 12, fontWeight: 700 }} title="Check-out" />
-                        </>
-                      )}
-                      <select value={(st === 'absent' || st === 'holiday' || st === 'on_leave') ? st : 'present'} onChange={(e) => setRibbonStatusFor(s.id, e.target.value)}
-                        style={{ border: '1px solid #E4E4EF', borderRadius: 8, padding: '5px 6px', fontSize: 11, fontWeight: 700 }} title="Override">
-                        <option value="present">In</option>
-                        <option value="absent">A</option>
-                        <option value="holiday">H</option>
-                        <option value="on_leave">L</option>
-                      </select>
-                    </span>
-                  ) : (
-                    <span style={{ display: 'flex', gap: 5, flex: 'none' }}>
-                      {ATT_CYCLE.map((code) => {
-                        const m = ATT_META[code]; const active = st === code;
-                        return (
-                          <button key={code} onClick={() => setRibbonStatusFor(s.id, code)} title={m.full}
-                            style={{ width: 34, height: 30, borderRadius: 8, fontSize: 11, fontWeight: 900, cursor: 'pointer',
-                              border: active ? `2px solid ${m.fg}` : '1px solid #ECECF3',
-                              background: active ? m.bg : '#FBFBFD', color: active ? m.fg : '#9298AA' }}>
-                            {m.lb}
-                          </button>
-                        );
-                      })}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-        <div className="df" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '14px 20px', borderTop: '1px solid #F0F0F5' }}>
-          <button className="btn-ghost" onClick={() => setRibbonOpen(false)} disabled={ribbonBusy} style={{ padding: '9px 16px' }}>Cancel</button>
-          <button className="btn-primary" onClick={saveRibbon} disabled={ribbonBusy} data-testid="quick-attendance-save"
-            style={{ padding: '9px 22px', background: '#2FA96A', border: 'none' }}>{ribbonBusy ? 'Saving…' : 'Save attendance'}</button>
-        </div>
-      </aside>
-
+      {/* Shared quick-attendance drawer (same one the right-side ribbon opens) */}
+      <QuickAttendanceDrawer
+        open={ribbonOpen}
+        onClose={() => setRibbonOpen(false)}
+        salonId={salonId}
+        getAuthHeaders={getAuthHeaders}
+      />
 
       {/* Mark Attendance drawer */}
       <div className={`staffv3-ov ${attOpen ? 'open' : ''}`} onClick={() => !attBusy && setAttOpen(false)} />
@@ -2132,8 +2047,8 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
                     </div>
                   </th>
                   <th>Date</th>
-                  <th style={{ width: 100 }}>In</th>
-                  <th style={{ width: 100 }}>Out</th>
+                  {isCheckInMode(salonSettings.attendance_method) && <th style={{ width: 100 }}>In</th>}
+                  {isCheckInMode(salonSettings.attendance_method) && <th style={{ width: 100 }}>Out</th>}
                   <th style={{ width: 90 }}>Status</th>
                 </tr>
               </thead>
@@ -2146,8 +2061,12 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
                       </div>
                     </td>
                     <td>{r.date}</td>
-                    <td><input type="time" className="time-in" value={r.in} disabled={!['P', 'H'].includes(r.status)} onChange={(e) => setRow(i, { in: e.target.value })} /></td>
-                    <td><input type="time" className="time-in" value={r.out} disabled={r.status !== 'P'} onChange={(e) => setRow(i, { out: e.target.value })} /></td>
+                    {isCheckInMode(salonSettings.attendance_method) && (
+                      <td><input type="time" className="time-in" value={r.in} disabled={!['P', 'H'].includes(r.status)} onChange={(e) => setRow(i, { in: e.target.value })} title="Check-in (IST)" /></td>
+                    )}
+                    {isCheckInMode(salonSettings.attendance_method) && (
+                      <td><input type="time" className="time-in" value={r.out} disabled={!['P', 'H'].includes(r.status)} onChange={(e) => setRow(i, { out: e.target.value })} title="Check-out (IST)" /></td>
+                    )}
                     <td>
                       {r.status ? (
                         <span className={`st-pill st-${r.status}`}>{r.status}</span>
@@ -2168,7 +2087,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
         </div>
         <div className="df">
           <span style={{ fontSize: 12, color: '#8A7F90', marginRight: 'auto' }}>
-            Method: <b>{salonSettings.attendance_method === 'checkinout' ? 'Check-in / Check-out' : 'Service completion'}</b>
+            Method: <b>{attendanceModeLabel(salonSettings.attendance_method)}</b>
           </span>
           <button className="btn-ghost" onClick={() => setAttOpen(false)} disabled={attBusy}>Cancel</button>
           <button className="btn-primary" onClick={saveAttendance} disabled={attBusy || attRows.length === 0} data-testid="att-drawer-save">
@@ -2348,7 +2267,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
         <div className="dh">
           <div className="tt">
             <div className="ic"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg></div>
-            <div><h3>Add Staff</h3><p>Mobile number becomes the login ID</p></div>
+            <div><h3>Add Staff</h3><p>Login access is set up separately under Access</p></div>
           </div>
           <button className="close" onClick={() => !addBusy && setAddOpen(false)}>
             <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -2372,7 +2291,7 @@ export default function SalonStaffV3({ salonId, getAuthHeaders }) {
               <input value={newStaff.emergency_contact}
                 onChange={(e) => setNewStaff({ ...newStaff, emergency_contact: e.target.value })} placeholder="+91…" /></div>
             <div className="field span3">
-              <span className="idnote"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>Mobile number is the unique login ID for this staff.</span>
+              <span className="idnote"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>Contact number. Staff log in with the login ID you set under Access, not this number.</span>
             </div>
           </div>
 

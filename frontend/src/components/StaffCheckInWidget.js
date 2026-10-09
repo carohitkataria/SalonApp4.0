@@ -2,7 +2,7 @@
  * Staff Check-in / Check-out widget (Geo attendance, Mode B).
  *
  * Renders ONLY when:
- *   - the salon's attendance_mode === 'geo_checkin', AND
+ *   - the salon uses Check-in / Check-out (any alias, see lib/attendance), AND
  *   - the logged-in user is linked to a staff/barber profile (staffId present).
  *
  * Flow:
@@ -17,6 +17,7 @@ import axios from 'axios';
 import { toast } from 'sonner';
 import { MapPin, LogIn, LogOut, Clock, CheckCircle2, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { isCheckInMode } from '@/lib/attendance';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -56,7 +57,7 @@ export default function StaffCheckInWidget({ salonId, staffId, staffName, getAut
       const [salonRes, attnRes] = await Promise.all([
         axios.get(`${API}/salons/${salonId}`).catch(() => ({ data: {} })),
         axios
-          .get(`${API}/salons/${salonId}/staff-attendance/month/${month}?barber_id=${staffId}`)
+          .get(`${API}/salons/${salonId}/staff-attendance/month/${month}?barber_id=${staffId}`, { headers })
           .catch(() => ({ data: {} })),
       ]);
       const salon = salonRes.data?.salon || salonRes.data || {};
@@ -71,7 +72,7 @@ export default function StaffCheckInWidget({ salonId, staffId, staffName, getAut
     } finally {
       setLoading(false);
     }
-  }, [salonId, staffId]);
+  }, [salonId, staffId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchState(); }, [fetchState]);
 
@@ -146,7 +147,7 @@ export default function StaffCheckInWidget({ salonId, staffId, staffName, getAut
   // Render gating
   if (loading) return null;
   if (!staffId) return null;
-  if (mode !== 'geo_checkin') return null;
+  if (!isCheckInMode(mode)) return null;
 
   const checkedOut = !isCheckedIn && (hasClosedSessionToday || !!record?.check_out_at);
 
