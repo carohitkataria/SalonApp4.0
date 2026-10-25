@@ -39,6 +39,7 @@ import {
   normalizeAttendanceMode, isCheckInMode, fmtIstClock, getBrowserLocation,
   notifyAttendanceChanged, ATTENDANCE_CHANGED_EVENT,
 } from '@/lib/attendance';
+import HelpDrawer from './home_v2/HelpDrawer';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -186,6 +187,7 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
   const [ordersOpen, setOrdersOpen] = useState(false);
   const [messagesOpen, setMessagesOpen] = useState(false);
   const [attOpen, setAttOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   // Phase 1 — topbar compact-on-scroll; Phase 2 — mobile "More" sheet.
   const [topbarScrolled, setTopbarScrolled] = useState(false);
@@ -476,10 +478,7 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
         </button>
         <div className="ribbon__sep" />
         <button className="ribbon__btn" data-tip="Help" data-testid="ribbon-help-btn"
-                onClick={() => {
-                  const msg = encodeURIComponent("Hi, I need help with SalonHub.");
-                  window.open(`https://wa.me/917503070727?text=${msg}`, '_blank', 'noopener,noreferrer');
-                }}>
+                onClick={() => setHelpOpen(true)}>
           <I.help />
         </button>
       </aside>
@@ -1049,6 +1048,9 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
         salonId={salonId}
         getAuthHeaders={getAuthHeaders}
       />
+
+      {/* Help centre — guides, FAQs, WhatsApp support (ribbon "?" icon). */}
+      <HelpDrawer open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }

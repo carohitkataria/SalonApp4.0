@@ -39,6 +39,7 @@ import MessagesDrawer from './MessagesDrawer';
 import SalonLogoControl from './SalonLogoControl';
 import OrdersDrawer from '@/components/ops/OrdersDrawer';
 import QuickAttendanceDrawer from './QuickAttendanceDrawer';
+import HelpDrawer from './HelpDrawer';
 
 // ---- Rail items — Home is provided by the logo click at top ----
 export const RAIL_ITEMS = [
@@ -119,6 +120,7 @@ export default function HomeV2Shell({
   const [messagesOpen, setMessagesOpen] = useState(false);
   const [ordersOpen, setOrdersOpen] = useState(false);
   const [attOpen, setAttOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [notifCount, setNotifCount] = useState(unreadNotifCount || 0);
   useEffect(() => { setNotifCount(unreadNotifCount || 0); }, [unreadNotifCount]);
 
@@ -281,10 +283,7 @@ export default function HomeV2Shell({
         </button>
         <div className="ribbon__sep" />
         <button className="ribbon__btn" data-tip="Help" data-testid="ribbon-help-btn"
-                onClick={() => {
-                  const msg = encodeURIComponent("Hi, I need help with SalonHub.");
-                  window.open(`https://wa.me/917503070727?text=${msg}`, '_blank', 'noopener,noreferrer');
-                }}>
+                onClick={() => setHelpOpen(true)}>
           <I.help />
         </button>
       </aside>
@@ -425,6 +424,9 @@ export default function HomeV2Shell({
         salonId={salonId}
         getAuthHeaders={getAuthHeaders}
       />
+
+      {/* Help centre — guides, FAQs, WhatsApp support (ribbon "?" icon). */}
+      <HelpDrawer open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }

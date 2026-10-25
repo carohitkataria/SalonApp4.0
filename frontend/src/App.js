@@ -18,6 +18,7 @@ import LandingPage from '@/pages/LandingPage';
 // User Pages
 import UserLoginPage from '@/pages/UserLoginPage';
 import PrivacyPolicyPage from '@/pages/PrivacyPolicyPage';
+import HelpGuidePage from '@/pages/HelpGuidePage';
 import AuthCallback from '@/pages/AuthCallback';
 import SalonSelectionPage from '@/pages/SalonSelectionPage';
 import SalonMainPage from '@/pages/SalonMainPage';
@@ -88,6 +89,7 @@ function App() {
                   
                   {/* User Routes */}
                   <Route path="/login" element={<UserLoginPage />} />
+                  <Route path="/help/guide" element={<HelpGuidePage />} />
                   <Route path="/privacy" element={<PrivacyPolicyPage />} />
                   <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
                   <Route path="/review/:tokenId" element={<CustomerReviewPage />} />
