@@ -13,7 +13,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import {
-  searchHelp, supportWhatsAppUrl, GUIDE_PATH, GUIDE_PDF,
+  searchHelp, supportWhatsAppUrl, topicVideo, GUIDE_PATH, GUIDE_PDF,
 } from '@/lib/helpContent';
 
 const CSS = `
@@ -52,6 +52,7 @@ const CSS = `
 .hlp-topic .in li b{font-weight:700;color:#211a3d}
 .hlp-topic .in li{margin-bottom:3px}
 .hlp-topic .in .row{display:flex;gap:8px;flex-wrap:wrap}
+.hlp-topic .in video{display:block;width:100%;border-radius:10px;background:#1c1830;margin:0 0 10px;aspect-ratio:16/10}
 .hlp-link{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:700;padding:7px 11px;border-radius:9px;text-decoration:none;cursor:pointer;border:none;font-family:inherit}
 .hlp-link.pri{background:#6C4FE0;color:#fff}
 .hlp-link.pri:hover{background:#5A3FD0}
@@ -149,6 +150,7 @@ export default function HelpDrawer({ open, onClose }) {
                 {isOpen && (
                   <div className="in">
                     <p>{t.summary}</p>
+                    <video controls preload="none" playsInline {...topicVideo(t.id)} data-testid={`help-video-${t.id}`} />
                     <ol>{t.parts.map((p) => <li key={p.img}><b>{p.title}</b> — {p.steps[0]}</li>)}</ol>
                     <div className="row">
                       <button type="button" className="hlp-link pri" onClick={() => openGuide(t.id)} data-testid={`help-guide-${t.id}`}>
