@@ -8,7 +8,7 @@
  */
 import React, { useEffect } from 'react';
 import {
-  HELP_TOPICS, GENERAL_FAQS, GUIDE_PDF, supportWhatsAppUrl, topicVideo,
+  HELP_TOPICS, GENERAL_FAQS, GUIDE_PDF, supportWhatsAppUrl,
 } from '@/lib/helpContent';
 
 const CSS = `
@@ -32,9 +32,6 @@ const CSS = `
 .hg h2{font-size:24px;margin:0 0 4px;font-weight:800;letter-spacing:-.3px;display:flex;align-items:center;gap:12px}
 .hg h2 .num{width:34px;height:34px;border-radius:10px;background:#F1EEFF;color:var(--pri);display:grid;place-items:center;font-size:16px;flex:none}
 .hg .sum{color:var(--mut);margin:0 0 18px}
-.hg .vid{margin:0 0 8px;max-width:720px}
-.hg .vid video{display:block;width:100%;border-radius:12px;background:#1c1830;aspect-ratio:16/10}
-.hg .vid span{display:block;font-size:12.5px;color:var(--mut);margin-top:6px}
 .hg h3{font-size:16.5px;margin:22px 0 10px;font-weight:800}
 .hg h3 .st{color:var(--pri);margin-right:6px}
 .hg figure{margin:0 0 12px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#fafafa}
@@ -58,7 +55,7 @@ const CSS = `
 @media print{
   @page{size:A4;margin:12mm}
   .hg{background:#fff}
-  .hg-bar,.hg .help,.hg .vid{display:none}
+  .hg-bar,.hg .help{display:none}
   .hg main{padding:0;max-width:none}
   .hg-card{border:none;padding:0;margin:0 0 10px}
   .hg-topic{break-before:page}
@@ -114,10 +111,6 @@ export default function HelpGuidePage() {
           <section key={t.id} id={t.id} className="hg-card hg-topic">
             <h2><span className="num">{ti + 1}</span>{t.title}</h2>
             <p className="sum">{t.summary}</p>
-            <div className="vid">
-              <video controls preload="none" playsInline {...topicVideo(t.id)} />
-              <span>Watch the {t.title.toLowerCase()} demo (silent, with captions).</span>
-            </div>
             {t.parts.map((p, pi) => (
               <div key={p.img} className="hg-part">
                 <h3><span className="st">{ti + 1}.{pi + 1}</span>{p.title}</h3>

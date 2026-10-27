@@ -56,6 +56,7 @@ import platform_admin_management as platform_admin_mgmt_mod
 
 # Import discount codes module (Phase 4 — Part D)
 import discount_codes as discount_codes_mod
+import help_center as help_center_mod
 
 # Phase 8 — Supplier auth/signup
 import supplier_auth as supplier_auth_mod
@@ -22102,6 +22103,10 @@ fastapi_app.include_router(platform_admin_mgmt_mod.management_router)
 # Phase 4 (Part D) — discount codes router
 discount_codes_mod.init_discount_codes_router(db=db)
 fastapi_app.include_router(discount_codes_mod.discount_codes_router)
+
+# Help Center — platform-managed help videos, FAQs and categories
+for _help_router in help_center_mod.init_help_center(db=db):
+    fastapi_app.include_router(_help_router)
 
 # Phase 8 (Part B) — Supplier auth + signup router
 supplier_auth_mod.init_supplier_auth_router(

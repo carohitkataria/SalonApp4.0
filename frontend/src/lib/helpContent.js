@@ -13,9 +13,6 @@ export const SUPPORT_WHATSAPP = '917503070727';
 export const GUIDE_PATH = '/help/guide';
 export const GUIDE_PDF = '/help/SalonHub-User-Guide.pdf';
 
-/** Short silent demo video (with captions) for a topic, plus its poster frame. */
-export const topicVideo = (id) => ({ src: `/help/videos/${id}.mp4`, poster: `/help/videos/${id}.jpg` });
-
 export const supportWhatsAppUrl = (topic) => {
   const msg = topic
     ? `Hi, I need help with "${topic}" in SalonHub.`
