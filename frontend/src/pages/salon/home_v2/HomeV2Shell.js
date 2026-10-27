@@ -38,6 +38,7 @@ import NotificationsDrawer from './NotificationsDrawer';
 import MessagesDrawer from './MessagesDrawer';
 import SalonLogoControl from './SalonLogoControl';
 import OrdersDrawer from '@/components/ops/OrdersDrawer';
+import InstallAppButton from '@/components/InstallAppButton';
 import QuickAttendanceDrawer from './QuickAttendanceDrawer';
 import HelpDrawer from './HelpDrawer';
 
@@ -311,6 +312,7 @@ export default function HomeV2Shell({
             <div className="searchbox" style={{ maxWidth: 460, padding: 0, background: 'transparent', border: 'none' }}>
               <GlobalSearchDropdown salonId={salonId} getAuthHeaders={getAuthHeaders} />
             </div>
+            <InstallAppButton />
             <div className="branch"><I.branch /> {salon?.city || 'Main Branch'}</div>
           </header>
         )}

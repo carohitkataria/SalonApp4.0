@@ -35,6 +35,7 @@ import OrdersDrawer from '@/components/ops/OrdersDrawer';
 import MessagesDrawer from './home_v2/MessagesDrawer';
 import SalonLogoControl from './home_v2/SalonLogoControl';
 import QuickAttendanceDrawer from './home_v2/QuickAttendanceDrawer';
+import InstallAppButton from '@/components/InstallAppButton';
 import {
   normalizeAttendanceMode, isCheckInMode, fmtIstClock, getBrowserLocation,
   notifyAttendanceChanged, ATTENDANCE_CHANGED_EVENT,
@@ -497,6 +498,7 @@ export default function SalonHomeV2({ salon, salonId, tokens = [], barbers = [],
           <div className="searchbox" style={{ maxWidth: 460, padding: 0, background: 'transparent', border: 'none' }}>
             <GlobalSearchDropdown salonId={salonId} getAuthHeaders={getAuthHeaders} />
           </div>
+          <InstallAppButton />
           <div className="branch"><I.branch /> {salon?.city || 'Main Branch'}</div>
         </header>
 

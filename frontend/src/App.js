@@ -1,4 +1,6 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { applyAppManifest } from '@/lib/installApp';
 import { AuthProvider } from '@/contexts/AuthContext';
 import { BranchProvider } from '@/contexts/BranchContext';
 import { WebSocketProvider } from '@/contexts/WebSocketContext';
@@ -70,6 +72,13 @@ import StaffSettingsPage from '@/pages/salon/StaffSettingsPage';
 
 import '@/App.css';
 
+// Salon pages install as the "SalonHub" desktop app; customer pages keep theirs.
+function AppManifestSwitcher() {
+  const { pathname } = useLocation();
+  useEffect(() => { applyAppManifest(pathname); }, [pathname]);
+  return null;
+}
+
 function App() {
   return (
     <ErrorBoundary>
@@ -83,6 +92,7 @@ function App() {
             <div className="App">
               <Toaster position="top-center" richColors />
               <BrowserRouter>
+                <AppManifestSwitcher />
                 <Routes>
                   {/* Landing Page */}
                   <Route path="/" element={<LandingPage />} />

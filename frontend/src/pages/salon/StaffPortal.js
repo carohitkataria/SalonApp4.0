@@ -9,6 +9,7 @@ import {
   CheckCircle2, Timer, CalendarClock,
 } from 'lucide-react';
 import { isCheckInMode, getBrowserLocation, fmtMinutes } from '@/lib/attendance';
+import InstallAppButton from '@/components/InstallAppButton';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -125,6 +126,7 @@ export default function StaffPortal() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <InstallAppButton variant="dark" />
           {anyPermission && (
             <Button variant="outline" size="sm" onClick={() => navigate('/salon/dashboard')} data-testid="open-dashboard-btn"
               className="border-white/20 bg-white/5 text-white hover:bg-white/10">

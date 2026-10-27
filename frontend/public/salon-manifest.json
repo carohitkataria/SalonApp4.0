@@ -1,0 +1,26 @@
+{
+  "id": "/salon/",
+  "name": "SalonHub for Salons",
+  "short_name": "SalonHub",
+  "description": "Run your salon: bookings, queue, staff, attendance and reports.",
+  "start_url": "/salon/dashboard?source=app",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "background_color": "#F6F6FB",
+  "theme_color": "#6C4FE0",
+  "orientation": "any",
+  "categories": ["business", "productivity"],
+  "icons": [
+    { "src": "/icons/salon-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/salon-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/salon-icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/salon-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Bookings", "url": "/salon/dashboard?tab=queue", "icons": [{ "src": "/icons/salon-icon-192.png", "sizes": "192x192" }] },
+    { "name": "Staff", "url": "/salon/dashboard?tab=staff", "icons": [{ "src": "/icons/salon-icon-192.png", "sizes": "192x192" }] },
+    { "name": "Reports", "url": "/salon/dashboard?tab=reports", "icons": [{ "src": "/icons/salon-icon-192.png", "sizes": "192x192" }] },
+    { "name": "Staff portal", "url": "/salon/staff-portal", "icons": [{ "src": "/icons/salon-icon-192.png", "sizes": "192x192" }] }
+  ]
+}

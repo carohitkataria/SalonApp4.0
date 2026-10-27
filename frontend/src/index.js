@@ -3,6 +3,8 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "@/index.css";
 import App from "@/App";
+// Capture the browser's "install app" event as early as possible.
+import "@/lib/installApp";
 
 // Perf (item 1a): global data cache. Defaults make each query download once and
 // be reused — no re-fetch on window focus / reconnect / component remount. Data
