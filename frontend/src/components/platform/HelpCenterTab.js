@@ -119,6 +119,9 @@ function VideoForm({ open, onClose, initial, categories, headers, onSaved }) {
       let v = initial?.id
         ? (await axios.put(`${API}/platform/help/videos/${initial.id}`, body, { headers })).data
         : (await axios.post(`${API}/platform/help/videos`, body, { headers })).data;
+      if (mode === 'link' && v.video_file_id) {
+        v = (await axios.delete(`${API}/platform/help/videos/${v.id}/file`, { headers })).data;
+      }
       if (mode === 'upload' && file) {
         const fd = new FormData(); fd.append('file', file);
         v = (await axios.post(`${API}/platform/help/videos/${v.id}/file`, fd, {
