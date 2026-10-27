@@ -16,7 +16,7 @@ import {
   Shield, LogOut, Loader2, Crown, Search, Building2, Users, IndianRupee,
   AlertTriangle, Check, X, Eye, Pause, Play, Settings2, ArrowLeft, History,
   Clock, BadgePercent, Megaphone, BarChart3, Package, Tag, RefreshCw,
-  MessageCircle,
+  MessageCircle, LifeBuoy,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -27,6 +27,7 @@ import DiscountCodesTab from '@/components/platform/DiscountCodesTab';
 import BroadcastTab from '@/components/platform/BroadcastTab';
 import SuppliersTab from '@/components/platform/SuppliersTab';
 import TemplateLibraryTab from '@/components/platform/TemplateLibraryTab';
+import HelpCenterTab from '@/components/platform/HelpCenterTab';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -683,6 +684,7 @@ export default function PlatformDashboardPage() {
             { id: 'discounts', label: 'Discount codes', icon: Tag },
             { id: 'analytics', label: 'Analytics', icon: BarChart3 },
             { id: 'broadcast', label: 'Broadcast', icon: Megaphone },
+            { id: 'help', label: 'Help center', icon: LifeBuoy },
           ].map(t => (
             <button
               key={t.id}
@@ -888,6 +890,7 @@ export default function PlatformDashboardPage() {
         {tab === 'discounts' && <DiscountCodesTab headers={headers} />}
         {tab === 'analytics' && <AnalyticsTab headers={headers} />}
         {tab === 'broadcast' && <BroadcastTab headers={headers} />}
+        {tab === 'help' && <HelpCenterTab headers={headers} />}
       </div>
 
       <OverrideModals
