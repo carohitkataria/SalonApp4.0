@@ -1,5 +1,8 @@
-import { ImageOff, Play } from 'lucide-react';
-import { useState } from 'react';
+import { ImageOff, Play, Camera } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import axios from 'axios';
+
+const API = `${process.env.REACT_APP_BACKEND_URL || ''}/api`;
 
 const isVideo = (url) =>
   typeof url === 'string' && (url.startsWith('data:video') || /\.(mp4|webm|mov|ogg)(\?|$)/i.test(url));
@@ -8,6 +11,12 @@ export default function SalonGalleryTab({ salon }) {
   const [selected, setSelected] = useState(null);
 
   const items = salon.photo_gallery && salon.photo_gallery.length > 0 ? salon.photo_gallery : [];
+  // Latest Instagram posts when the salon has connected Instagram (Marketing → Media).
+  const [ig, setIg] = useState(null);
+  useEffect(() => {
+    if (!salon?.id) return;
+    axios.get(`${API}/public/salons/${salon.id}/instagram`).then((r) => setIg(r.data)).catch(() => setIg(null));
+  }, [salon?.id]);
 
   return (
     <div className="space-y-6">
@@ -61,6 +70,22 @@ export default function SalonGalleryTab({ salon }) {
         <div className="text-center py-16 bg-card rounded-xl border border-border">
           <ImageOff className="w-16 h-16 text-muted-foreground/30 mx-auto mb-4" />
           <p className="text-muted-foreground">No gallery media available</p>
+        </div>
+      )}
+
+      {ig?.connected && ig.items?.length > 0 && (
+        <div className="space-y-3" data-testid="salon-instagram-feed">
+          <h3 className="text-lg font-bold text-foreground flex items-center gap-2">
+            <Camera className="w-5 h-5" /> From our Instagram
+            {ig.username && <a href={`https://instagram.com/${ig.username}`} target="_blank" rel="noopener noreferrer" className="text-sm font-semibold text-primary">@{ig.username}</a>}
+          </h3>
+          <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+            {ig.items.slice(0, 12).map((m) => (
+              <a key={m.id} href={m.permalink} target="_blank" rel="noopener noreferrer" className="aspect-square rounded-lg overflow-hidden bg-black block">
+                <img src={m.media_type === 'VIDEO' ? m.thumbnail_url : m.media_url} alt={m.caption || 'Instagram post'} className="w-full h-full object-cover hover:scale-105 transition-transform" loading="lazy" />
+              </a>
+            ))}
+          </div>
         </div>
       )}
 

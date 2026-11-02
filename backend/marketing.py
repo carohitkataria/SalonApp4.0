@@ -1426,6 +1426,14 @@ async def _run_campaign(salon_id: str, campaign_id: str) -> None:
     if campaign.get("template_id"):
         tmpl = await _db.salon_templates.find_one(
             {"id": campaign["template_id"], "salon_id": salon_id})
+        if not tmpl:
+            # Templates the salon created in Marketing → Templates (and the
+            # one-click photo template) live in marketing_templates with
+            # approval_status; normalise them to the salon_templates shape.
+            mt = await _db.marketing_templates.find_one(
+                {"id": campaign["template_id"], "salon_id": salon_id})
+            if mt:
+                tmpl = {**mt, "meta_status": (mt.get("approval_status") or "").lower()}
     _media_type = (campaign.get("header_media_type") or "").lower()
     _media_url = campaign.get("header_media_url")
     _media_id = campaign.get("header_media_id")
@@ -1454,6 +1462,11 @@ async def _run_campaign(salon_id: str, campaign_id: str) -> None:
         # Best-effort body params for the template send: map the first {{N}} to
         # the guest's first name (the common "Hi {{1}}" shape).
         _tmpl_params = [ctx["name"]] if (tmpl_name and "{{" in (tmpl.get("body") or "")) else []
+        if tmpl_name and "{{2}}" in (tmpl.get("body") or ""):
+            # Photo template ("Hi {{1}}, {{2}}"): {{2}} carries the campaign message.
+            # Meta rejects params with newlines/tabs or 4+ consecutive spaces.
+            _msg = re.sub(r"\s+", " ", body).strip() or " "
+            _tmpl_params.append(_msg[:900])
         result = await _send_one_campaign_message(
             salon_id=salon_id,
             campaign_id=campaign_id,

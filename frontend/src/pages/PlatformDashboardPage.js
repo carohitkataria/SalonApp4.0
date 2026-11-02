@@ -16,7 +16,7 @@ import {
   Shield, LogOut, Loader2, Crown, Search, Building2, Users, IndianRupee,
   AlertTriangle, Check, X, Eye, Pause, Play, Settings2, ArrowLeft, History,
   Clock, BadgePercent, Megaphone, BarChart3, Package, Tag, RefreshCw,
-  MessageCircle, LifeBuoy,
+  MessageCircle, LifeBuoy, CalendarDays,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -28,6 +28,7 @@ import BroadcastTab from '@/components/platform/BroadcastTab';
 import SuppliersTab from '@/components/platform/SuppliersTab';
 import TemplateLibraryTab from '@/components/platform/TemplateLibraryTab';
 import HelpCenterTab from '@/components/platform/HelpCenterTab';
+import FestivalCalendarTab from '@/components/platform/FestivalCalendarTab';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -685,6 +686,7 @@ export default function PlatformDashboardPage() {
             { id: 'analytics', label: 'Analytics', icon: BarChart3 },
             { id: 'broadcast', label: 'Broadcast', icon: Megaphone },
             { id: 'help', label: 'Help center', icon: LifeBuoy },
+            { id: 'festivals', label: 'Festival calendar', icon: CalendarDays },
           ].map(t => (
             <button
               key={t.id}
@@ -891,6 +893,7 @@ export default function PlatformDashboardPage() {
         {tab === 'analytics' && <AnalyticsTab headers={headers} />}
         {tab === 'broadcast' && <BroadcastTab headers={headers} />}
         {tab === 'help' && <HelpCenterTab headers={headers} />}
+        {tab === 'festivals' && <FestivalCalendarTab headers={headers} />}
       </div>
 
       <OverrideModals
