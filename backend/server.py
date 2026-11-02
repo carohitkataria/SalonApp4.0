@@ -22226,6 +22226,10 @@ marketing_mod.init_marketing_router(
 )
 fastapi_app.include_router(marketing_mod.marketing_router)
 
+# Marketing Studio — posters, photo campaigns, festival calendar, Instagram
+import marketing_studio as marketing_studio_mod  # noqa: E402
+fastapi_app.include_router(marketing_studio_mod.init_marketing_studio(db=db))
+
 # Marketing Settings Module (Twilio sub-account, Cashfree wallet, DLT, email, sending windows)
 import salon_marketing_settings as mkt_settings_mod  # noqa: E402
 mkt_settings_mod.init_marketing_settings_router(
@@ -22492,6 +22496,10 @@ async def startup_event():
         marketing_mod.register_marketing_jobs(scheduler)
     except Exception as _e:
         logger.error(f"[STARTUP] marketing scheduler registration failed: {_e}")
+    try:
+        scheduler.add_job(marketing_studio_mod.run_instagram_jobs, "interval", minutes=5, id="marketing.instagram.jobs")
+    except Exception as _e:
+        logger.error(f"[STARTUP] instagram scheduler registration failed: {_e}")
     # Marketing M0 — one-time migration to add can_access_marketing=true to
     # admin/branch-manager records. We overwrite existing values (default:
     # admins/BM = True) because the field was added AFTER their records were

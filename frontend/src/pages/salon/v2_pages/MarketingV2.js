@@ -23,12 +23,15 @@ import axios from 'axios';
 import { toast } from 'sonner';
 import { V2_PAGES_CSS } from './styles_v2';
 import MarketingSettingsPanel from './MarketingSettingsPanel';
+import { PosterStudio, CalendarPanel, InstagramCard, PhotoPicker, STUDIO_CSS } from './MarketingStudio';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 const API = `${BACKEND_URL}/api`;
 
 // ---------------------- Small icon set ----------------------
 const Ico = {
+  cal: () => <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
+  brush: () => <svg viewBox="0 0 24 24"><path d="M9.06 11.9 17 4l3 3-7.94 7.94"/><path d="M7 14a3 3 0 0 0-3 3c0 1.5-1 2-2 2 1 1.5 2.5 2 4 2a4 4 0 0 0 4-4 3 3 0 0 0-3-3z"/></svg>,
   send: () => <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>,
   bolt: () => <svg viewBox="0 0 24 24"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
   chat: () => <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>,
@@ -452,6 +455,9 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
   const [editingAutomation, setEditingAutomation] = useState(null);
   const [editingCampaign, setEditingCampaign] = useState(null);
   const [segmentDrawer, setSegmentDrawer] = useState(false);
+  const [posterPrefill, setPosterPrefill] = useState(null);
+  const [campaignPrefill, setCampaignPrefill] = useState(null);
+  const openCampaign = (pf) => { setCampaignPrefill(pf); setEditingCampaign(null); setCampaignDrawer(true); setTab('campaigns'); };
   const [editingSegment, setEditingSegment] = useState(null);
 
   // Stable auth reference so background auto-refresh doesn't recreate fetchAll
@@ -682,6 +688,8 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
       <div className="subtabs">
         {[
           { id: 'overview', label: 'Overview', ic: Ico.chart },
+          { id: 'calendar', label: 'Calendar', ic: Ico.cal },
+          { id: 'studio', label: 'Studio', ic: Ico.brush },
           { id: 'campaigns', label: 'Campaigns', ic: Ico.send },
           { id: 'templates', label: 'Templates', ic: Ico.chat },
           { id: 'offers', label: 'Offers & Perks', ic: Ico.tag },
@@ -1128,9 +1136,26 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
         <SalonHubReviewsPanel salonId={salonId} authHeaders={authHeaders} />
       )}
 
+      <style>{STUDIO_CSS}</style>
+      {/* ===== CALENDAR ===== */}
+      {tab === 'calendar' && (
+        <CalendarPanel salon={salon} salonId={salonId} authHeaders={authHeaders}
+          onMakePoster={(pf) => { setPosterPrefill({ ...pf, _k: Date.now() }); setTab('studio'); }}
+          onCreateCampaign={(pf) => openCampaign(pf)} />
+      )}
+
+      {/* ===== STUDIO (posters + 1-tap share) ===== */}
+      {tab === 'studio' && (
+        <PosterStudio salon={salon} salonId={salonId} authHeaders={authHeaders} coupons={coupons} plans={plans}
+          prefill={posterPrefill} onSendCampaign={(pf) => openCampaign(pf)} />
+      )}
+
       {/* ===== MEDIA (renamed from Gallery) ===== */}
       {tab === 'media' && (
-        <MediaPanel salon={salon} salonId={salonId} authHeaders={authHeaders} />
+        <div style={{display:'flex', flexDirection:'column', gap:18}}>
+          <InstagramCard salonId={salonId} authHeaders={authHeaders} />
+          <MediaPanel salon={salon} salonId={salonId} authHeaders={authHeaders} />
+        </div>
       )}
 
       {/* ===== SETTINGS ===== */}
@@ -1145,15 +1170,18 @@ export default function MarketingV2({ salonId, getAuthHeaders, salon }) {
       <NewCampaignDrawer
         open={!!campaignDrawer}
         preselectSegmentId={typeof campaignDrawer === 'object' ? campaignDrawer.preselectSegmentId : undefined}
-        onClose={() => { setCampaignDrawer(false); setEditingCampaign(null); }}
+        onClose={() => { setCampaignDrawer(false); setEditingCampaign(null); setCampaignPrefill(null); }}
         segments={segments}
         segCounts={segCounts}
         templates={templates}
         coupons={coupons}
         salonId={salonId}
+        salon={salon}
         authHeaders={authHeaders}
         initial={editingCampaign}
-        onSaved={() => { setCampaignDrawer(false); setEditingCampaign(null); fetchAll(); }}
+        prefill={campaignPrefill}
+        onTemplatesChanged={() => fetchAll({ silent: true })}
+        onSaved={() => { setCampaignDrawer(false); setEditingCampaign(null); setCampaignPrefill(null); fetchAll(); }}
       />
       <NewAutomationDrawer
         open={automationDrawer}
@@ -1392,11 +1420,10 @@ function MediaPanel({ salon, salonId, authHeaders }) {
           <div className="t"><Ico.wifi /> Social media <span style={{marginLeft:6, fontSize:10, fontWeight:800, background:'var(--amber-bg)', color:'var(--amber)', padding:'2px 7px', borderRadius:20}}>COMING SOON</span></div>
         </div>
         <p style={{fontSize:12.5, color:'var(--muted)', marginBottom:6}}>
-          Auto-import posts &amp; reels from your salon's Instagram, YouTube, Facebook and TikTok.
+          Auto-import posts from your salon's YouTube, Facebook and TikTok. (Instagram is connected above.)
         </p>
         <div className="social-grid">
           {[
-            {n:'Instagram', bg:'linear-gradient(135deg,#E91E63,#8E24AA)', d:'Latest posts & reels'},
             {n:'YouTube',   bg:'linear-gradient(135deg,#E53935,#B71C1C)', d:'Channel videos'},
             {n:'Facebook',  bg:'linear-gradient(135deg,#1E88E5,#0D47A1)', d:'Page posts'},
             {n:'TikTok',    bg:'linear-gradient(135deg,#111,#333)',       d:'Short videos'},
@@ -1488,7 +1515,7 @@ function MarketingGuardrailsCard({ salonId, authHeaders }) {
 }
 
 // -------------------- Drawer: New/Edit Campaign --------------------
-function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCounts, templates, coupons, salonId, authHeaders, initial, onSaved }) {
+function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCounts, templates, coupons, salonId, salon, authHeaders, initial, prefill, onTemplatesChanged, onSaved }) {
   const editing = !!(initial && initial.id);
   const [name, setName] = useState('');
   const [audienceMode, setAudienceMode] = useState('segment');
@@ -1505,6 +1532,9 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
   const [headerMediaUrl, setHeaderMediaUrl] = useState('');
   const [headerMediaId, setHeaderMediaId] = useState('');
   const [uploadingMedia, setUploadingMedia] = useState(false);
+  // Easy photo campaigns: pick a poster/photo; the approved photo template is used automatically.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [photoSetup, setPhotoSetup] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -1524,9 +1554,18 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
       setName(''); setAudienceMode('segment'); setSegId(preselectSegmentId || ''); setAdHocPhones('');
       setChannel('whatsapp'); setTmplId(''); setBody(''); setCouponId(''); setScheduleAt('');
       setHeaderMediaUrl(''); setHeaderMediaId('');
+      if (prefill) {
+        setName(prefill.name || '');
+        setBody(prefill.body || '');
+        if (prefill.photoUrl) {
+          const ok = templates.find((t) => String(t.header_format || '').toUpperCase() === 'IMAGE' && String(t.approval_status || t.meta_status || '').toLowerCase() === 'approved');
+          if (ok) setTmplId(ok.id);
+          setHeaderMediaUrl(prefill.photoUrl);
+        }
+      }
     }
     setAudience(null);
-  }, [open, initial, preselectSegmentId]);
+  }, [open, initial, preselectSegmentId, prefill]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const phonesArr = useMemo(() => adHocPhones.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean), [adHocPhones]);
 
@@ -1536,6 +1575,43 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
     const f = String(selectedTmpl?.header_format || '').toUpperCase();
     return ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(f) ? f.toLowerCase() : '';
   }, [selectedTmpl]);
+  const tStatus = (t) => String(t?.approval_status || t?.meta_status || 'draft').toLowerCase();
+  const photoTemplates = useMemo(() => templates.filter((t) => String(t.header_format || '').toUpperCase() === 'IMAGE'), [templates]);
+  const approvedPhotoTmpl = photoTemplates.find((t) => tStatus(t) === 'approved');
+  const pendingPhotoTmpl = photoTemplates.find((t) => ['pending', 'in_review', 'submitted'].includes(tStatus(t)));
+  const photoUrl = mediaHeader === 'image' || !tmplId ? headerMediaUrl : '';
+  const choosePhoto = (url) => {
+    if (approvedPhotoTmpl && tmplId !== approvedPhotoTmpl.id && mediaHeader !== 'image') setTmplId(approvedPhotoTmpl.id);
+    setHeaderMediaUrl(url); setHeaderMediaId(''); setPickerOpen(false);
+  };
+  // While the photo template is waiting for approval, re-check it each time the composer opens.
+  useEffect(() => {
+    if (!open || !pendingPhotoTmpl) return;
+    axios.get(`${API}/salons/${salonId}/marketing/photo-template/status`, { headers: authHeaders() })
+      .then((r) => { if (r.data?.approval_status && r.data.approval_status !== tStatus(pendingPhotoTmpl)) onTemplatesChanged?.(); })
+      .catch(() => {});
+  }, [open, pendingPhotoTmpl?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const removePhoto = () => { setHeaderMediaUrl(''); setHeaderMediaId(''); if (mediaHeader === 'image') setTmplId(''); };
+  // One time per salon: create the ready-made photo template and send it to WhatsApp for approval.
+  const setupPhotoTemplate = async () => {
+    if (!headerMediaUrl) return;
+    setPhotoSetup(true);
+    try {
+      const blob = await (await fetch(headerMediaUrl)).blob();
+      const fd = new FormData();
+      fd.append('file', new File([blob], 'sample.png', { type: blob.type || 'image/png' }));
+      const up = await axios.post(`${API}/salons/${salonId}/media/upload`, fd, { headers: authHeaders() });
+      const handle = up.data?.handle || up.data?.media_id || null;
+      const t = (await axios.post(`${API}/salons/${salonId}/marketing/photo-template`, { sample_url: headerMediaUrl, sample_handle: handle }, { headers: authHeaders() })).data;
+      if (tStatus(t) !== 'approved') {
+        const r = await axios.post(`${API}/salons/${salonId}/marketing/photo-template/submit`, {}, { headers: authHeaders() });
+        toast.success(`Photo template sent to WhatsApp for approval (${r.data?.approval_status || 'pending'}). This is needed only once.`);
+      }
+      onTemplatesChanged?.();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Could not set up photo sending');
+    } finally { setPhotoSetup(false); }
+  };
 
   // Live recipient + cost estimate
   useEffect(() => {
@@ -1558,9 +1634,10 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
   const applyTemplate = (id) => {
     setTmplId(id);
     const t = templates.find(x => x.id === id);
-    if (t) setBody(t.body || '');
-    // Reset any previously attached media when the template changes.
-    setHeaderMediaUrl('');
+    const isPhoto = String(t?.header_format || '').toUpperCase() === 'IMAGE';
+    if (t && !(isPhoto && body.trim())) setBody(isPhoto ? '' : (t.body || ''));
+    // Reset any previously attached media when the template changes (keep the photo for photo templates).
+    if (!isPhoto) setHeaderMediaUrl('');
     setHeaderMediaId('');
   };
 
@@ -1674,10 +1751,10 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
       <div className="v2-field"><label>Template</label>
         <select value={tmplId} onChange={(e) => applyTemplate(e.target.value)}>
           <option value="">— Custom message —</option>
-          {templates.map(t => <option key={t.id} value={t.id}>{t.name} ({t.meta_status || 'draft'})</option>)}
+          {templates.map(t => <option key={t.id} value={t.id}>{t.friendly_name || t.name} ({t.approval_status || t.meta_status || 'draft'})</option>)}
         </select>
       </div>
-      {mediaHeader && (
+      {mediaHeader && mediaHeader !== 'image' && (
         <div className="v2-field">
           <label>Header {mediaHeader} (required for this template)</label>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1711,7 +1788,38 @@ function NewCampaignDrawer({ open, onClose, preselectSegmentId, segments, segCou
           </p>
         </div>
       )}
-      <div className="v2-field"><label>Message body</label>
+      {channel === 'whatsapp' && !(mediaHeader && mediaHeader !== 'image') && (
+        <div className="v2-field" data-testid="campaign-photo">
+          <label>Photo (optional)</label>
+          {photoUrl ? (
+            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+              <img src={photoUrl} alt="campaign" style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 12, border: '1px solid #E4E4EF' }} data-testid="campaign-photo-preview" />
+              <div style={{ flex: 1, minWidth: 200, fontSize: 12.5, lineHeight: 1.5 }}>
+                {mediaHeader === 'image' ? (
+                  <div style={{ color: '#137A3C', fontWeight: 700 }}>✓ Guests get this photo with your message.</div>
+                ) : pendingPhotoTmpl ? (
+                  <div style={{ color: '#9A5B00' }}>Photo sending is waiting for WhatsApp approval (usually minutes to a few hours). Save or schedule now — until it is approved the message goes without the photo.</div>
+                ) : (
+                  <>
+                    <div style={{ color: '#5C5480' }}>WhatsApp needs a one-time approved <b>photo template</b> before you can send photos to guests.</div>
+                    <button type="button" className="btn-primary" style={{ marginTop: 8 }} onClick={setupPhotoTemplate} disabled={photoSetup} data-testid="campaign-photo-setup">
+                      {photoSetup ? 'Setting up…' : 'Set up photo sending (one time)'}
+                    </button>
+                  </>
+                )}
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button type="button" className="btn-ghost" onClick={() => setPickerOpen(true)}>Change</button>
+                  <button type="button" className="btn-ghost" onClick={removePhoto}>Remove</button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <button type="button" className="btn-ghost" onClick={() => setPickerOpen(true)} data-testid="campaign-add-photo">+ Add a photo or poster</button>
+          )}
+          <PhotoPicker open={pickerOpen} onClose={() => setPickerOpen(false)} salon={salon} salonId={salonId} authHeaders={authHeaders} onPick={({ url }) => choosePhoto(url)} />
+        </div>
+      )}
+      <div className="v2-field"><label>{photoUrl ? 'Message (sent with the photo)' : 'Message body'}</label>
         <textarea placeholder="Hi {{name}}, we miss you! Here's 20% off…" value={body} onChange={(e) => setBody(e.target.value)} data-testid="campaign-body-input" />
       </div>
       <div className="v2-field"><label>Attach coupon (optional)</label>
