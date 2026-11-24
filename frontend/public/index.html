@@ -9,8 +9,23 @@
       name="description"
       content="SalonHub — Luxury salon booking & live queue management"
     />
-    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="SalonHub" />
     <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
+    <script>
+      // Salon pages install as the "SalonHub" desktop app (see src/lib/installApp.js).
+      (function () {
+        var p = location.pathname.split('/').filter(Boolean);
+        var salon = ['login', 'signup', 'dashboard', 'staff-portal', 'staff', 'marketplace',
+          'checkout', 'orders', 'inventory', 'customer-orders'];
+        if (p[0] === 'salon' && salon.indexOf(p[1]) !== -1) {
+          document.querySelector('link[rel="manifest"]').setAttribute('href', '/salon-manifest.json');
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#6C4FE0');
+        }
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <!-- Preload + non-blocking load of the primary type stack so text paints on-theme

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#6C4FE0" />
+  <title>SalonHub — offline</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #F6F6FB; color: #23252F;
+      font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+    .wrap { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; }
+    .card { background: #fff; border: 1px solid #ECECF3; border-radius: 18px; padding: 32px 28px; max-width: 380px; width: 100%;
+      text-align: center; box-shadow: 0 10px 40px rgba(30, 32, 50, 0.06); }
+    img { width: 64px; height: 64px; border-radius: 16px; }
+    h1 { font-size: 19px; margin: 16px 0 6px; }
+    p { font-size: 14px; color: #6B6F80; line-height: 1.5; margin: 0 0 20px; }
+    button { border: none; background: #6C4FE0; color: #fff; font-weight: 700; font-size: 14px;
+      border-radius: 10px; padding: 10px 22px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <img src="/icons/salon-icon-192.png" alt="SalonHub" />
+      <h1>You're offline</h1>
+      <p>SalonHub needs an internet connection. Check your Wi-Fi or mobile data, then try again.</p>
+      <button type="button" onclick="location.reload()">Try again</button>
+    </div>
+  </div>
+  <script>window.addEventListener('online', function () { location.reload(); });</script>
+</body>
+</html>

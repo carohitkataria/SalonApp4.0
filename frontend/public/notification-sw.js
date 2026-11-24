@@ -13,9 +13,33 @@
  * On notification click, the SW focuses the existing tab (or opens one).
  */
 
+// Desktop app (installed SalonHub): when a page can't load because the
+// device is offline, show a branded offline screen instead of the browser's
+// error page. Only page navigations are handled; everything else (API calls,
+// assets) goes straight to the network untouched.
+const OFFLINE_CACHE = 'salonhub-offline-v1';
+const OFFLINE_ASSETS = ['/offline.html', '/icons/salon-icon-192.png'];
+
 self.addEventListener('install', (event) => {
   // Activate immediately so the very first registration can post messages.
   self.skipWaiting();
+  event.waitUntil(
+    caches.open(OFFLINE_CACHE).then((cache) => cache.addAll(OFFLINE_ASSETS)).catch(() => {})
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.mode === 'navigate' && req.method === 'GET') {
+    // Revalidate the page with the server (a cheap 304 when online) so a stale
+    // copy in the HTTP cache is never shown while offline.
+    event.respondWith(
+      fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' })
+        .catch(() => caches.match('/offline.html'))
+    );
+  } else if (req.url.endsWith('/icons/salon-icon-192.png')) {
+    event.respondWith(fetch(req).catch(() => caches.match(req)));
+  }
 });
 
 self.addEventListener('activate', (event) => {
@@ -34,8 +58,8 @@ self.addEventListener('message', (event) => {
       self.registration.showNotification(title, {
         body,
         tag,
-        icon: '/favicon.ico',
-        badge: '/favicon.ico',
+        icon: '/icons/salon-icon-192.png',
+        badge: '/icons/salon-icon-192.png',
         requireInteraction: !!data.requireInteraction,
         data: { url },
       })
