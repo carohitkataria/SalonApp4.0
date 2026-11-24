@@ -52,6 +52,14 @@ logger = logging.getLogger(__name__)
 _db = None
 _bucket: Optional[AsyncIOMotorGridFSBucket] = None
 
+
+def _gridfs() -> AsyncIOMotorGridFSBucket:
+    """GridFS bucket, created on first use so importing the module never needs a real database."""
+    global _bucket
+    if _bucket is None:
+        _bucket = AsyncIOMotorGridFSBucket(_db, bucket_name="help_media")
+    return _bucket
+
 admin_router = APIRouter(prefix="/api/platform/help", tags=["platform-help-center"])
 public_router = APIRouter(prefix="/api/help", tags=["help-center"])
 
@@ -156,7 +164,7 @@ async def _delete_file(file_id: Optional[str]):
     if not file_id:
         return
     try:
-        await _bucket.delete(_oid(file_id))
+        await _gridfs().delete(_oid(file_id))
     except Exception:  # already gone
         logger.info("help media %s already removed", file_id)
 
@@ -165,7 +173,7 @@ async def _store_upload(file: UploadFile, allowed: set, max_bytes: int, kind: st
     ctype = (file.content_type or "").lower()
     if ctype not in allowed:
         raise HTTPException(status_code=400, detail=f"Unsupported {kind} type: {ctype or 'unknown'}")
-    stream = _bucket.open_upload_stream(file.filename or kind, metadata={"content_type": ctype, "kind": kind})
+    stream = _gridfs().open_upload_stream(file.filename or kind, metadata={"content_type": ctype, "kind": kind})
     size = 0
     try:
         while True:
@@ -364,7 +372,7 @@ async def public_help(audience: str = Query("salon")):
 @public_router.get("/media/{file_id}")
 async def stream_media(file_id: str, request: Request):
     try:
-        grid_out = await _bucket.open_download_stream(_oid(file_id))
+        grid_out = await _gridfs().open_download_stream(_oid(file_id))
     except Exception:
         raise HTTPException(status_code=404, detail="File not found")
     size = grid_out.length
@@ -411,5 +419,5 @@ async def count_view(video_id: str):
 def init_help_center(*, db):
     global _db, _bucket
     _db = db
-    _bucket = AsyncIOMotorGridFSBucket(db, bucket_name="help_media")
+    _bucket = None  # created on first use (see _gridfs)
     return admin_router, public_router
