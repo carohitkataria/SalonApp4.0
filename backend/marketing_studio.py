@@ -49,6 +49,14 @@ logger = logging.getLogger(__name__)
 _db = None
 _bucket: Optional[AsyncIOMotorGridFSBucket] = None
 
+
+def _gridfs() -> AsyncIOMotorGridFSBucket:
+    """GridFS bucket, created on first use so importing the module never needs a real database."""
+    global _bucket
+    if _bucket is None:
+        _bucket = AsyncIOMotorGridFSBucket(_db, bucket_name="marketing_media")
+    return _bucket
+
 router = APIRouter(prefix="/api", tags=["marketing-studio"])
 
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -107,7 +115,7 @@ async def _store_image(file: UploadFile, salon_id: str, kind: str) -> str:
     ctype = (file.content_type or "").lower()
     if ctype not in IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Upload a JPG, PNG or WebP image")
-    stream = _bucket.open_upload_stream(file.filename or f"{kind}.png",
+    stream = _gridfs().open_upload_stream(file.filename or f"{kind}.png",
                                         metadata={"content_type": ctype, "salon_id": salon_id, "kind": kind})
     size = 0
     try:
@@ -129,7 +137,7 @@ async def _store_image(file: UploadFile, salon_id: str, kind: str) -> str:
 async def _delete_media(media_id: Optional[str]):
     if media_id:
         try:
-            await _bucket.delete(_oid(media_id))
+            await _gridfs().delete(_oid(media_id))
         except Exception:
             logger.info("marketing media %s already removed", media_id)
 
@@ -145,7 +153,7 @@ async def upload_marketing_media(salon_id: str, request: Request, file: UploadFi
 @router.get("/public/marketing-media/{media_id}")
 async def get_marketing_media(media_id: str):
     try:
-        g = await _bucket.open_download_stream(_oid(media_id))
+        g = await _gridfs().open_download_stream(_oid(media_id))
     except Exception:
         raise HTTPException(status_code=404, detail="Not found")
     ctype = (g.metadata or {}).get("content_type") or "image/png"
@@ -726,5 +734,5 @@ async def run_instagram_jobs():
 def init_marketing_studio(*, db):
     global _db, _bucket
     _db = db
-    _bucket = AsyncIOMotorGridFSBucket(db, bucket_name="marketing_media")
+    _bucket = None  # created on first use (see _gridfs)
     return router
